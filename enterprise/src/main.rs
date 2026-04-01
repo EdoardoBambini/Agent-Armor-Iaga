@@ -38,10 +38,14 @@ async fn main() {
         tracing::info!("Seeding demo data...");
         use agent_armor::demo::scenarios::{demo_profiles, demo_workspace_policies};
         for p in demo_profiles() {
-            let _ = storage.upsert_profile(&p).await;
+            if let Err(e) = storage.upsert_profile(&p).await {
+                tracing::warn!(agent_id = %p.agent_id, error = %e, "Failed to seed demo profile");
+            }
         }
         for w in demo_workspace_policies() {
-            let _ = storage.upsert_workspace(&w).await;
+            if let Err(e) = storage.upsert_workspace(&w).await {
+                tracing::warn!(workspace_id = %w.workspace_id, error = %e, "Failed to seed demo workspace");
+            }
         }
     }
 
@@ -58,7 +62,7 @@ async fn main() {
         webhook_manager,
         behavioral_engine: Arc::new(BehavioralEngine::new()),
         rate_limiter: Arc::new(RateLimiter::new(Default::default())),
-        threat_feed: Arc::new(ThreatFeed::new()),
+        threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
         env: app_env,
     });
 

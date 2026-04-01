@@ -9,15 +9,15 @@ pub fn normalize_mcp_payload(input: &InspectRequest) -> HashMap<String, serde_js
     );
     map.insert(
         "actionType".to_string(),
-        serde_json::to_value(input.action.action_type).unwrap(),
+        serde_json::to_value(input.action.action_type).unwrap_or_default(),
     );
     map.insert(
         "payload".to_string(),
-        serde_json::to_value(&input.action.payload).unwrap(),
+        serde_json::to_value(&input.action.payload).unwrap_or_default(),
     );
     map.insert(
         "requestedSecrets".to_string(),
-        serde_json::to_value(input.requested_secrets.as_deref().unwrap_or(&[])).unwrap(),
+        serde_json::to_value(input.requested_secrets.as_deref().unwrap_or(&[])).unwrap_or_default(),
     );
     map
 }

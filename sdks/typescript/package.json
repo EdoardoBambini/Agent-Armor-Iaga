@@ -9,7 +9,7 @@
     "prepublishOnly": "npm run build"
   },
   "keywords": ["ai", "agents", "governance", "security", "mcp", "a2a", "iaga"],
-  "author": "IAGA <hello@iaga.tech>",
+  "author": "IAGA <iaga.start@gmail.com>",
   "license": "MIT",
   "devDependencies": {
     "typescript": "^5.0.0"
@@ -17,6 +17,6 @@
   "files": ["dist", "README.md"],
   "repository": {
     "type": "git",
-    "url": "https://github.com/iaga-tech/agent-armor"
+    "url": "https://github.com/EdoardoBambini/Agent-Armor-Iaga"
   }
 }

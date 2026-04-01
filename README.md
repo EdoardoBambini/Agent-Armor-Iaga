@@ -14,10 +14,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/iaga-tech/agent-armor/actions"><img src="https://github.com/iaga-tech/agent-armor/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/EdoardoBambini/Agent-Armor-Iaga/actions"><img src="https://github.com/EdoardoBambini/Agent-Armor-Iaga/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-BUSL--1.1-blue" alt="License"></a>
   <img src="https://img.shields.io/badge/rust-1.75%2B-orange" alt="Rust">
-  <a href="https://discord.gg/agent-armor"><img src="https://img.shields.io/discord/placeholder?label=Discord" alt="Discord"></a>
+  <a href="https://www.iaga.tech"><img src="https://img.shields.io/badge/site-iaga.tech-purple" alt="IAGA"></a>
 </p>
 
 <p align="center">
@@ -115,13 +115,13 @@ Beyond the core 8-layer pipeline, Agent Armor includes advanced capabilities for
 
 **Option 1: Docker (recommended)**
 ```bash
-docker run -p 4010:4010 -e AGENT_ARMOR_OPEN_MODE=true ghcr.io/iaga-tech/agent-armor:latest
+docker compose up -d
 ```
 
 **Option 2: From source**
 ```bash
-git clone https://github.com/iaga-tech/agent-armor.git
-cd agent-armor/community
+git clone https://github.com/EdoardoBambini/Agent-Armor-Iaga.git
+cd Agent-Armor-Iaga/community
 cargo build --release
 ./target/release/agent-armor gen-key --label "my-first-key"
 ./target/release/agent-armor serve
@@ -149,8 +149,8 @@ Open `http://localhost:4010` to access the cyberpunk security dashboard.
 
 ```bash
 # Clone and start
-git clone https://github.com/iaga-tech/agent-armor.git
-cd agent-armor
+git clone https://github.com/EdoardoBambini/Agent-Armor-Iaga.git
+cd Agent-Armor-Iaga
 docker compose up -d
 
 # Generate your first API key
@@ -234,7 +234,8 @@ When no API keys exist, all endpoints are open (bootstrap mode).
 | `POST` | `/v1/firewall/scan` | Scan for prompt injection |
 | `GET` | `/v1/firewall/stats` | Firewall statistics |
 | `GET` | `/v1/telemetry/spans` | OpenTelemetry spans |
-| `POST` | `/v1/telemetry/ingest` | Ingest telemetry data |
+| `GET` | `/v1/telemetry/metrics` | Telemetry metrics |
+| `GET` | `/v1/telemetry/export` | Export OTLP-compatible telemetry |
 
 ### Response Scanning
 
@@ -484,6 +485,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ## License
 
 [Business Source License 1.1](LICENSE) — free for non-production use, converts to Apache 2.0 after 4 years.
+
+## Disclaimer
+
+Agent Armor is provided **"as is"**, without warranty of any kind, express or implied. The authors and contributors make no guarantees regarding the software's functionality, reliability, availability, or suitability for any particular purpose. Agent Armor is **not a substitute for a comprehensive security program** — it is a supplementary governance layer. Use of this software is entirely at your own risk. In no event shall the authors be liable for any claim, damages, or other liability arising from the use of or inability to use this software.
 
 ---
 

@@ -73,12 +73,15 @@ fn now_ms() -> u64 {
 
 // ── Analyzers ──
 
-fn analyze_shell(command: &str) -> ImpactAnalysis {
-    let mut details = Vec::new();
-    let mut severity = "low".to_string();
-    let mut reversible = true;
+struct ShellCheck {
+    regex: Regex,
+    severity: &'static str,
+    description: &'static str,
+    reversible: bool,
+}
 
-    let checks: Vec<(&str, &str, &str, bool)> = vec![
+static SHELL_CHECKS: Lazy<Vec<ShellCheck>> = Lazy::new(|| {
+    let defs: Vec<(&str, &str, &str, bool)> = vec![
         (
             r"rm\s+(-rf?|--recursive)",
             "critical",
@@ -118,15 +121,29 @@ fn analyze_shell(command: &str) -> ImpactAnalysis {
             true,
         ),
     ];
+    defs.into_iter()
+        .filter_map(|(pat, sev, desc, rev)| {
+            Regex::new(pat).ok().map(|re| ShellCheck {
+                regex: re,
+                severity: sev,
+                description: desc,
+                reversible: rev,
+            })
+        })
+        .collect()
+});
 
-    for (pattern, sev, desc, rev) in &checks {
-        if let Ok(re) = Regex::new(pattern) {
-            if re.is_match(command) {
-                severity = sev.to_string();
-                details.push(desc.to_string());
-                if !rev {
-                    reversible = false;
-                }
+fn analyze_shell(command: &str) -> ImpactAnalysis {
+    let mut details = Vec::new();
+    let mut severity = "low".to_string();
+    let mut reversible = true;
+
+    for check in SHELL_CHECKS.iter() {
+        if check.regex.is_match(command) {
+            severity = check.severity.to_string();
+            details.push(check.description.to_string());
+            if !check.reversible {
+                reversible = false;
             }
         }
     }

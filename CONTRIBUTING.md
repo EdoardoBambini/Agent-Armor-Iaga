@@ -5,8 +5,8 @@ Thanks for your interest in contributing to Agent Armor! This project is buildin
 ## Getting Started
 
 ```bash
-git clone https://github.com/YOUR_ORG/agent-armor.git
-cd agent-armor/community
+git clone https://github.com/EdoardoBambini/Agent-Armor-Iaga.git
+cd Agent-Armor-Iaga/community
 cargo build
 cargo run
 ```
@@ -39,7 +39,7 @@ cargo fmt                     # Format code
 
 - Use GitHub Issues
 - Include: what you expected, what happened, steps to reproduce
-- For security issues, email info@iaga.tech instead
+- For security issues, email iaga.start@gmail.com instead
 
 ### Pull Requests
 

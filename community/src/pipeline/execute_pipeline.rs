@@ -101,7 +101,9 @@ pub async fn execute_pipeline(
             review_status: ReviewStatus::NotRequired,
             risk_score: 0,
         };
-        let _ = state.audit_store.append(&stored).await;
+        if let Err(e) = state.audit_store.append(&stored).await {
+            tracing::error!(event_id = %stored.event_id, error = %e, "Failed to persist audit event");
+        }
 
         return Ok(GovernanceResult {
             protocol: detect_protocol(input),

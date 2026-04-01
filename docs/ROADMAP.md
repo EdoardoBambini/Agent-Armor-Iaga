@@ -35,8 +35,8 @@
 - [x] Rate limiting and throttling
 - [ ] Structured logging with log levels
 - [ ] Graceful shutdown and health probes
-- [ ] Docker image and Helm chart
-- [ ] CI/CD pipeline (GitHub Actions)
+- [x] Docker image and Helm chart
+- [x] CI/CD pipeline (GitHub Actions)
 
 ## Phase 4 — Enterprise
 
@@ -50,8 +50,8 @@
 
 ## Phase 5 — Ecosystem
 
-- [ ] Python SDK — pip installable client
-- [ ] TypeScript SDK — npm installable client
+- [x] Python SDK — pip installable client
+- [x] TypeScript SDK — npm installable client
 - [ ] Framework adapters (LangChain, CrewAI, AutoGen)
 - [ ] MCP server mode (act as MCP proxy)
 - [ ] Community policy marketplace

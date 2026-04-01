@@ -16,10 +16,13 @@ Thumbs.db
 .agents/
 skills-lock.json
 
-# Benchmark artifacts
+# Benchmark scripts/data (charts/ PNGs are committed for README)
 benchmark_v2.py
 benchmark_results.csv
 benchmark_v2_results.csv
-charts/
 *.pyc
 __pycache__/
+
+# Internal docs
+docs/PRD.md
+assets/hero.mp4

@@ -714,10 +714,14 @@ async fn seed_demo_data(storage: &Arc<SqliteStorage>) {
 
     tracing::info!("Seeding demo data into database...");
     for profile in demo_profiles() {
-        let _ = storage.upsert_profile(&profile).await;
+        if let Err(e) = storage.upsert_profile(&profile).await {
+            tracing::warn!(agent_id = %profile.agent_id, error = %e, "Failed to seed demo profile");
+        }
     }
     for workspace in demo_workspace_policies() {
-        let _ = storage.upsert_workspace(&workspace).await;
+        if let Err(e) = storage.upsert_workspace(&workspace).await {
+            tracing::warn!(workspace_id = %workspace.workspace_id, error = %e, "Failed to seed demo workspace");
+        }
     }
     tracing::info!("Demo data seeded");
 }
@@ -790,10 +794,14 @@ async fn auto_import_config(storage: &Arc<SqliteStorage>) {
                 };
 
             for p in &config.profiles {
-                let _ = storage.upsert_profile(p).await;
+                if let Err(e) = storage.upsert_profile(p).await {
+                    tracing::warn!(agent_id = %p.agent_id, error = %e, "Failed to import profile from config");
+                }
             }
             for w in &config.workspaces {
-                let _ = storage.upsert_workspace(w).await;
+                if let Err(e) = storage.upsert_workspace(w).await {
+                    tracing::warn!(workspace_id = %w.workspace_id, error = %e, "Failed to import workspace from config");
+                }
             }
             tracing::info!(
                 profiles = config.profiles.len(),

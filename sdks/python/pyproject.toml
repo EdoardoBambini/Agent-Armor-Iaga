@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
 authors = [
-    { name = "IAGA", email = "hello@iaga.tech" },
+    { name = "IAGA", email = "iaga.start@gmail.com" },
 ]
 keywords = ["ai", "agents", "governance", "security", "mcp", "a2a"]
 classifiers = [
@@ -28,5 +28,5 @@ dependencies = [
 sync = ["requests>=2.28"]
 
 [project.urls]
-Homepage = "https://github.com/iaga-tech/agent-armor"
-Documentation = "https://docs.iaga.tech/agent-armor"
+Homepage = "https://github.com/EdoardoBambini/Agent-Armor-Iaga"
+Documentation = "https://github.com/EdoardoBambini/Agent-Armor-Iaga"

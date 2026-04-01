@@ -671,7 +671,7 @@ pub fn scan_prompt(text: &str) -> FirewallResult {
         risk_score = (risk_score + 5).min(100);
     }
 
-    let blocked = risk_score >= 80;
+    let blocked = risk_score >= 75;
 
     let summary = if blocked {
         let categories: Vec<String> = stage_results

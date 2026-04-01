@@ -1642,7 +1642,7 @@ components:
           type: string
         publicKey:
           type: string
-          description: Base64-encoded Ed25519 public key
+          description: Hex-encoded HMAC-SHA256 public key
         workspaceId:
           type: string
         capabilities:
@@ -1686,7 +1686,7 @@ components:
           type: string
         signature:
           type: string
-          description: Base64-encoded Ed25519 signature
+          description: Hex-encoded HMAC-SHA256 signature
         verified:
           type: boolean
 

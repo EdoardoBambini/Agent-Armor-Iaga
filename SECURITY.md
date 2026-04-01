@@ -10,7 +10,7 @@
 
 **Do NOT open a public GitHub issue for security vulnerabilities.**
 
-Please email **info@iaga.tech** with:
+Please email **iaga.start@gmail.com** with:
 
 1. A description of the vulnerability
 2. Steps to reproduce

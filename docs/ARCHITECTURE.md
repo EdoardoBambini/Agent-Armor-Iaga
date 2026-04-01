@@ -19,7 +19,7 @@ Request → DPI → Taint → NHI → Risk → Sandbox → Policy → Firewall �
 - Detects exfiltration when tainted data flows to external sinks
 
 ### Layer 3: Non-Human Identity Registry
-- Every agent gets a cryptographic identity (Ed25519)
+- Every agent gets a cryptographic identity (HMAC-SHA256)
 - Key pair generation and storage
 - Signed attestation for agent actions
 
@@ -107,7 +107,7 @@ Best for: Kubernetes, containerized agents, tight local enforcement.
 - **HTTP**: Axum 0.8 with Tower middleware
 - **Storage**: SQLite via sqlx (async)
 - **Auth**: Argon2 password hashing, Bearer token middleware
-- **Crypto**: Ed25519 for NHI identity attestation
+- **Crypto**: HMAC-SHA256 for NHI identity attestation
 - **Events**: Tokio broadcast channels → SSE + webhooks
 - **Config**: JSON + YAML support via serde
 

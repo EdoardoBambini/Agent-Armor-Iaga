@@ -98,6 +98,34 @@ jobs:
           name: agent-armor-binary
           path: community/target/release/agent-armor
 
+  enterprise:
+    name: Enterprise (check + build)
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            community/target
+            enterprise/target
+          key: ${{ runner.os }}-cargo-enterprise-${{ hashFiles('enterprise/Cargo.lock', 'community/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-enterprise-
+
+      - name: Check enterprise compiles
+        working-directory: enterprise
+        run: cargo check
+
+      - name: Build enterprise release
+        working-directory: enterprise
+        run: cargo build --release
+
   release:
     name: Release
     runs-on: ubuntu-latest
