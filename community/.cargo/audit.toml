@@ -1,0 +1,8 @@
+# Ignored advisories for cargo audit
+#
+# RUSTSEC-2023-0071: rsa timing sidechannel (Marvin Attack)
+# - Pulled transitively via sqlx-macros-core -> sqlx-mysql
+# - We only use SQLite, never MySQL — the vulnerable code is never executed
+# - No upstream fix available as of April 2026
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]
