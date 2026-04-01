@@ -1,0 +1,16 @@
+services:
+  agent-armor:
+    build: .
+    ports:
+      - "4010:4010"
+    volumes:
+      - agent-armor-data:/app/data
+    environment:
+      - PORT=4010
+      - DATABASE_URL=sqlite:///app/data/agent_armor.db?mode=rwc
+      - AGENT_ARMOR_OPEN_MODE=false
+      - AGENT_ARMOR_NHI_MASTER_SEED=${AGENT_ARMOR_NHI_MASTER_SEED}
+    restart: unless-stopped
+
+volumes:
+  agent-armor-data:

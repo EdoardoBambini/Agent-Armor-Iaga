@@ -1,0 +1,25 @@
+target/
+node_modules/
+dist/
+.env
+.env.*
+*.key
+*.pem
+*.db
+*.sqlite
+.DS_Store
+.claude/
+npm-debug.log*
+Thumbs.db
+
+# Claude Code local files
+.agents/
+skills-lock.json
+
+# Benchmark artifacts
+benchmark_v2.py
+benchmark_results.csv
+benchmark_v2_results.csv
+charts/
+*.pyc
+__pycache__/

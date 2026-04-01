@@ -1,0 +1,22 @@
+{
+  "name": "@agent-armor/sdk",
+  "version": "0.1.0",
+  "description": "IAGA Agent Armor SDK — Zero-trust governance for autonomous AI agents",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["ai", "agents", "governance", "security", "mcp", "a2a", "iaga"],
+  "author": "IAGA <hello@iaga.tech>",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "files": ["dist", "README.md"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iaga-tech/agent-armor"
+  }
+}

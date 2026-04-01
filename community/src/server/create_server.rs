@@ -1,0 +1,780 @@
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    middleware as axum_middleware,
+    response::{Html, IntoResponse, Json},
+    routing::{delete, get, post, put},
+    Router,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tower_http::cors::CorsLayer;
+
+use crate::auth::api_keys::generate_api_key;
+use crate::auth::middleware::auth_middleware;
+use crate::core::errors::ArmorError;
+use crate::core::types::*;
+use crate::dashboard::index_html::render_dashboard_html;
+use crate::events::bus::ArmorEvent;
+use crate::events::sse::sse_handler;
+use crate::events::webhooks::WebhookConfig;
+use crate::modules::injection_firewall::prompt_firewall;
+use crate::modules::nhi::crypto_identity;
+use crate::modules::policy::formal_verify;
+use crate::modules::risk::adaptive_scorer;
+use crate::modules::sandbox::sandbox_executor;
+use crate::modules::session_graph::session_dag;
+use crate::modules::telemetry::otel_emitter;
+use crate::modules::threat_intel::feed::ThreatIndicator;
+use crate::pipeline::execute_pipeline::{execute_pipeline, get_sensitive_patterns, scan_response};
+use crate::server::app_state::AppState;
+
+#[derive(Serialize)]
+struct HealthResponse {
+    ok: bool,
+    service: String,
+    mode: String,
+}
+
+#[derive(Deserialize)]
+struct ReviewBody {
+    status: ReviewAction,
+}
+
+#[derive(Deserialize)]
+struct CreateApiKeyBody {
+    label: String,
+}
+
+#[derive(Serialize)]
+struct ApiKeyCreated {
+    id: String,
+    key: String,
+    label: String,
+}
+
+#[derive(Deserialize)]
+struct CreateWebhookBody {
+    url: String,
+    secret: String,
+    #[serde(default)]
+    event_filter: Vec<String>,
+}
+
+pub fn create_router(state: Arc<AppState>) -> Router {
+    let mode = state.env.default_mode.to_string();
+
+    // Public routes (no auth)
+    let public = Router::new().route("/", get(dashboard_handler)).route(
+        "/health",
+        get(move || async move {
+            Json(HealthResponse {
+                ok: true,
+                service: "agent-armor".into(),
+                mode: mode.clone(),
+            })
+        }),
+    );
+
+    // Protected routes (auth middleware)
+    let protected = Router::new()
+        // Core pipeline
+        .route("/v1/inspect", post(inspect_handler))
+        // Audit
+        .route("/v1/audit", get(audit_handler))
+        // Reviews
+        .route("/v1/reviews", get(reviews_handler))
+        .route("/v1/reviews/{id}", post(review_action_handler))
+        // Profiles CRUD
+        .route("/v1/profiles", get(list_profiles_handler))
+        .route("/v1/profiles", post(upsert_profile_handler))
+        .route("/v1/profiles/{agent_id}", get(get_profile_handler))
+        .route("/v1/profiles/{agent_id}", put(upsert_profile_handler))
+        .route("/v1/profiles/{agent_id}", delete(delete_profile_handler))
+        // Workspaces CRUD
+        .route("/v1/workspaces", get(list_workspaces_handler))
+        .route("/v1/workspaces", post(upsert_workspace_handler))
+        .route("/v1/workspaces/{workspace_id}", get(get_workspace_handler))
+        .route(
+            "/v1/workspaces/{workspace_id}",
+            put(upsert_workspace_handler),
+        )
+        .route(
+            "/v1/workspaces/{workspace_id}",
+            delete(delete_workspace_handler),
+        )
+        // API Keys
+        .route("/v1/auth/keys", get(list_api_keys_handler))
+        .route("/v1/auth/keys", post(create_api_key_handler))
+        .route("/v1/auth/keys/{id}", delete(delete_api_key_handler))
+        // Webhooks
+        .route("/v1/webhooks", get(list_webhooks_handler))
+        .route("/v1/webhooks", post(create_webhook_handler))
+        .route("/v1/webhooks/{id}", delete(delete_webhook_handler))
+        // SSE event stream
+        .route("/v1/events/stream", get(sse_handler))
+        // ── 8-Layer Security Stack ──
+        // L1: Session Graph
+        .route("/v1/sessions", get(list_sessions_handler))
+        .route("/v1/sessions/{id}/metrics", get(session_metrics_handler))
+        // L2: Taint (inline in pipeline, no separate endpoint needed)
+        // L3: NHI Identity
+        .route("/v1/nhi/identities", get(list_identities_handler))
+        .route("/v1/nhi/identities", post(register_identity_handler))
+        .route("/v1/nhi/attest", post(attest_handler))
+        .route("/v1/nhi/tokens", post(issue_token_handler))
+        // L4: Risk Scoring
+        .route("/v1/risk/weights", get(risk_weights_handler))
+        .route("/v1/risk/feedback", post(risk_feedback_handler))
+        // L5: Sandbox
+        .route("/v1/sandbox/pending", get(sandbox_pending_handler))
+        .route("/v1/sandbox/{id}/approve", post(sandbox_approve_handler))
+        .route("/v1/sandbox/{id}/reject", post(sandbox_reject_handler))
+        // L6: Policy Verification
+        .route(
+            "/v1/policy/verify/{workspace_id}",
+            get(verify_policy_handler),
+        )
+        // Response scanning
+        .route("/v1/response/scan", post(response_scan_handler))
+        .route("/v1/response/patterns", get(response_patterns_handler))
+        // L7: Injection Firewall
+        .route("/v1/firewall/scan", post(firewall_scan_handler))
+        .route("/v1/firewall/stats", get(firewall_stats_handler))
+        // L8: Telemetry
+        .route("/v1/telemetry/spans", get(telemetry_spans_handler))
+        .route("/v1/telemetry/metrics", get(telemetry_metrics_handler))
+        .route("/v1/telemetry/export", get(telemetry_export_handler))
+        // Behavioral Fingerprinting
+        .route("/v1/fingerprint", get(list_fingerprints_handler))
+        .route("/v1/fingerprint/{agent_id}", get(get_fingerprint_handler))
+        // Rate Limiting
+        .route(
+            "/v1/rate-limit/status/{agent_id}",
+            get(rate_limit_status_handler),
+        )
+        .route("/v1/rate-limit/config", get(get_rate_limit_config_handler))
+        .route(
+            "/v1/rate-limit/config",
+            post(update_rate_limit_config_handler),
+        )
+        // Threat Intelligence Feed
+        .route(
+            "/v1/threat-intel/indicators",
+            get(list_threat_indicators_handler),
+        )
+        .route(
+            "/v1/threat-intel/indicators",
+            post(add_threat_indicator_handler),
+        )
+        .route(
+            "/v1/threat-intel/indicators/{id}",
+            delete(delete_threat_indicator_handler),
+        )
+        .route("/v1/threat-intel/stats", get(threat_intel_stats_handler))
+        .route("/v1/threat-intel/check", post(threat_intel_check_handler))
+        // Demo
+        .route("/v1/demo/scenarios", get(demo_scenarios_handler))
+        .route("/v1/demo/run-adapter", post(run_adapter_handler))
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
+
+    public
+        .merge(protected)
+        .layer({
+            use axum::http::{header, Method};
+            CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+        })
+        .with_state(state)
+}
+
+// ── Dashboard ──
+
+async fn dashboard_handler() -> Html<String> {
+    Html(render_dashboard_html())
+}
+
+// ── Core Pipeline ──
+
+async fn inspect_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<InspectRequest>,
+) -> Result<impl IntoResponse, ArmorError> {
+    let result = execute_pipeline(&payload, &state).await?;
+
+    tracing::info!(
+        agent_id = %payload.agent_id,
+        tool_name = %payload.action.tool_name,
+        decision = ?result.decision,
+        "governed agent action"
+    );
+
+    // Emit event to bus (SSE + webhooks)
+    state
+        .event_bus
+        .publish(ArmorEvent::from_governance_result(&result));
+
+    Ok(Json(result))
+}
+
+// ── Audit ──
+
+async fn audit_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<StoredAuditEvent>>, ArmorError> {
+    let events = state.audit_store.list(100).await?;
+    Ok(Json(events))
+}
+
+// ── Reviews ──
+
+async fn reviews_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<ReviewRequest>>, ArmorError> {
+    let reviews = state.review_store.list().await?;
+    Ok(Json(reviews))
+}
+
+async fn review_action_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<ReviewBody>,
+) -> Result<Json<ReviewRequest>, ArmorError> {
+    let status_str = match body.status {
+        ReviewAction::Approved => "approved",
+        ReviewAction::Rejected => "rejected",
+    };
+    let updated = state.review_store.update_status(&id, status_str).await?;
+
+    // Emit review resolved event
+    state.event_bus.publish(ArmorEvent::ReviewResolved {
+        review_id: id,
+        status: status_str.to_string(),
+    });
+
+    Ok(Json(updated))
+}
+
+// ── Profiles CRUD ──
+
+async fn list_profiles_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<AgentProfile>>, ArmorError> {
+    let profiles = state.policy_store.list_profiles().await?;
+    Ok(Json(profiles))
+}
+
+async fn get_profile_handler(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AgentProfile>, ArmorError> {
+    let profile = state.policy_store.get_agent_profile(&agent_id).await?;
+    Ok(Json(profile))
+}
+
+async fn upsert_profile_handler(
+    State(state): State<Arc<AppState>>,
+    Json(profile): Json<AgentProfile>,
+) -> Result<impl IntoResponse, ArmorError> {
+    state.policy_store.upsert_profile(&profile).await?;
+    Ok((StatusCode::OK, Json(profile)))
+}
+
+async fn delete_profile_handler(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+) -> Result<StatusCode, ArmorError> {
+    state.policy_store.delete_profile(&agent_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Workspaces CRUD ──
+
+async fn list_workspaces_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<WorkspacePolicy>>, ArmorError> {
+    let workspaces = state.policy_store.list_workspaces().await?;
+    Ok(Json(workspaces))
+}
+
+async fn get_workspace_handler(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<WorkspacePolicy>, ArmorError> {
+    let ws = state
+        .policy_store
+        .get_workspace_policy(&workspace_id)
+        .await?;
+    Ok(Json(ws))
+}
+
+async fn upsert_workspace_handler(
+    State(state): State<Arc<AppState>>,
+    Json(policy): Json<WorkspacePolicy>,
+) -> Result<impl IntoResponse, ArmorError> {
+    state.policy_store.upsert_workspace(&policy).await?;
+    Ok((StatusCode::OK, Json(policy)))
+}
+
+async fn delete_workspace_handler(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+) -> Result<StatusCode, ArmorError> {
+    state.policy_store.delete_workspace(&workspace_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── API Keys ──
+
+async fn list_api_keys_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<crate::storage::traits::ApiKeyRecord>>, ArmorError> {
+    let keys = state.api_key_store.list_keys().await?;
+    Ok(Json(keys))
+}
+
+async fn create_api_key_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateApiKeyBody>,
+) -> Result<(StatusCode, Json<ApiKeyCreated>), ArmorError> {
+    let (raw_key, key_hash) = generate_api_key();
+    let key_id = uuid::Uuid::new_v4().to_string();
+    state
+        .api_key_store
+        .store_key(&key_id, &key_hash, &body.label, &raw_key)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiKeyCreated {
+            id: key_id,
+            key: raw_key,
+            label: body.label,
+        }),
+    ))
+}
+
+async fn delete_api_key_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ArmorError> {
+    state.api_key_store.delete_key(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Demo ──
+
+async fn demo_scenarios_handler() -> Json<Vec<DemoScenario>> {
+    Json(crate::demo::scenarios::demo_scenarios())
+}
+
+async fn run_adapter_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<DemoResult>>, ArmorError> {
+    let scenarios = crate::demo::scenarios::demo_scenarios();
+    let mut results = Vec::new();
+
+    for scenario in &scenarios {
+        let result = execute_pipeline(&scenario.request, &state).await?;
+        tracing::info!(
+            agent_id = %scenario.request.agent_id,
+            tool_name = %scenario.request.action.tool_name,
+            decision = ?result.decision,
+            "adapter scenario governed"
+        );
+        results.push(DemoResult {
+            step: scenario.step.clone(),
+            title: scenario.title.clone(),
+            decision: result.decision,
+            risk: result.risk.score,
+        });
+    }
+
+    Ok(Json(results))
+}
+
+// ── L1: Session Graph ──
+
+async fn list_sessions_handler() -> Json<Vec<serde_json::Value>> {
+    let sessions = session_dag::list_active_sessions();
+    let json: Vec<serde_json::Value> = sessions
+        .into_iter()
+        .filter_map(|s| serde_json::to_value(s).ok())
+        .collect();
+    Json(json)
+}
+
+async fn session_metrics_handler(Path(id): Path<String>) -> impl IntoResponse {
+    match session_dag::get_session_metrics(&id) {
+        Some(m) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(m).unwrap_or_default()),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+// ── L3: NHI Identity ──
+
+async fn list_identities_handler() -> Json<Vec<serde_json::Value>> {
+    let ids = crypto_identity::list_identities();
+    let json: Vec<serde_json::Value> = ids
+        .into_iter()
+        .filter_map(|i| serde_json::to_value(i).ok())
+        .collect();
+    Json(json)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterIdentityBody {
+    agent_id: String,
+    workspace_id: Option<String>,
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+async fn register_identity_handler(
+    Json(body): Json<RegisterIdentityBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let identity = crypto_identity::register_identity(
+        &body.agent_id,
+        body.workspace_id.as_deref(),
+        body.capabilities,
+    );
+    (
+        StatusCode::CREATED,
+        Json(serde_json::to_value(identity).unwrap_or_default()),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AttestBody {
+    agent_id: String,
+    challenge: String,
+}
+
+async fn attest_handler(Json(body): Json<AttestBody>) -> Json<serde_json::Value> {
+    let result = crypto_identity::attest_agent(&body.agent_id, &body.challenge);
+    Json(serde_json::to_value(result).unwrap_or_default())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueTokenBody {
+    agent_id: String,
+    capabilities: Vec<String>,
+    #[serde(default = "default_ttl")]
+    ttl_seconds: i64,
+}
+
+fn default_ttl() -> i64 {
+    3600
+}
+
+async fn issue_token_handler(Json(body): Json<IssueTokenBody>) -> impl IntoResponse {
+    match crypto_identity::issue_capability_token(
+        &body.agent_id,
+        body.capabilities,
+        body.ttl_seconds,
+    ) {
+        Some(token) => (
+            StatusCode::CREATED,
+            Json(serde_json::to_value(token).unwrap_or_default()),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "agent not registered"})),
+        )
+            .into_response(),
+    }
+}
+
+// ── L4: Risk Scoring ──
+
+async fn risk_weights_handler() -> Json<serde_json::Value> {
+    let weights = adaptive_scorer::get_current_weights();
+    Json(serde_json::to_value(weights).unwrap_or_default())
+}
+
+#[derive(Deserialize)]
+struct FeedbackBody {
+    feedback: String,
+}
+
+async fn risk_feedback_handler(Json(body): Json<FeedbackBody>) -> Json<serde_json::Value> {
+    adaptive_scorer::apply_feedback(&body.feedback);
+    let weights = adaptive_scorer::get_current_weights();
+    Json(serde_json::json!({
+        "applied": body.feedback,
+        "weights": serde_json::to_value(weights).unwrap_or_default()
+    }))
+}
+
+// ── L5: Sandbox ──
+
+async fn sandbox_pending_handler() -> Json<Vec<serde_json::Value>> {
+    let pending = sandbox_executor::list_pending();
+    let json: Vec<serde_json::Value> = pending
+        .into_iter()
+        .filter_map(|s| serde_json::to_value(s).ok())
+        .collect();
+    Json(json)
+}
+
+async fn sandbox_approve_handler(Path(id): Path<String>) -> impl IntoResponse {
+    match sandbox_executor::approve_sandbox(&id) {
+        Some(r) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(r).unwrap_or_default()),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "sandbox not found"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn sandbox_reject_handler(Path(id): Path<String>) -> impl IntoResponse {
+    match sandbox_executor::reject_sandbox(&id) {
+        Some(r) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(r).unwrap_or_default()),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "sandbox not found"})),
+        )
+            .into_response(),
+    }
+}
+
+// ── L6: Policy Verification ──
+
+async fn verify_policy_handler(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ArmorError> {
+    let policy = state
+        .policy_store
+        .get_workspace_policy(&workspace_id)
+        .await?;
+    let result = formal_verify::verify_policy(&policy);
+    Ok(Json(serde_json::to_value(result).unwrap_or_default()))
+}
+
+// ── L7: Injection Firewall ──
+
+#[derive(Deserialize)]
+struct FirewallScanBody {
+    text: String,
+}
+
+async fn firewall_scan_handler(Json(body): Json<FirewallScanBody>) -> Json<serde_json::Value> {
+    let result = prompt_firewall::scan_prompt(&body.text);
+    Json(serde_json::to_value(result).unwrap_or_default())
+}
+
+async fn firewall_stats_handler() -> Json<serde_json::Value> {
+    let stats = prompt_firewall::get_firewall_stats();
+    Json(serde_json::to_value(stats).unwrap_or_default())
+}
+
+// ── L8: Telemetry ──
+
+async fn telemetry_spans_handler() -> Json<Vec<serde_json::Value>> {
+    let spans = otel_emitter::get_recent_spans(100);
+    let json: Vec<serde_json::Value> = spans
+        .into_iter()
+        .filter_map(|s| serde_json::to_value(s).ok())
+        .collect();
+    Json(json)
+}
+
+async fn telemetry_metrics_handler() -> Json<Vec<serde_json::Value>> {
+    let metrics = otel_emitter::get_recent_metrics(100);
+    let json: Vec<serde_json::Value> = metrics
+        .into_iter()
+        .filter_map(|m| serde_json::to_value(m).ok())
+        .collect();
+    Json(json)
+}
+
+async fn telemetry_export_handler() -> Json<Vec<serde_json::Value>> {
+    let records = otel_emitter::export_otlp_json(200);
+    let json: Vec<serde_json::Value> = records
+        .into_iter()
+        .filter_map(|r| serde_json::to_value(r).ok())
+        .collect();
+    Json(json)
+}
+
+// ── Response Scanning ──
+
+async fn response_scan_handler(
+    Json(payload): Json<ResponseScanRequest>,
+) -> Json<ResponseScanResult> {
+    let result = scan_response(&payload);
+
+    tracing::info!(
+        request_id = %payload.request_id,
+        agent_id = %payload.agent_id,
+        tool_name = %payload.tool_name,
+        decision = ?result.decision,
+        risk_score = result.risk_score,
+        "scanned tool response"
+    );
+
+    Json(result)
+}
+
+async fn response_patterns_handler() -> Json<Vec<SensitivePattern>> {
+    Json(get_sensitive_patterns())
+}
+
+// ── Behavioral Fingerprinting ──
+
+async fn get_fingerprint_handler(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    match state.behavioral_engine.get_fingerprint(&agent_id) {
+        Some(fp) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(fp).unwrap_or_default()),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "agent fingerprint not found"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn list_fingerprints_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<serde_json::Value>> {
+    let fingerprints = state.behavioral_engine.list_fingerprints();
+    let json: Vec<serde_json::Value> = fingerprints
+        .into_iter()
+        .filter_map(|fp| serde_json::to_value(fp).ok())
+        .collect();
+    Json(json)
+}
+
+// ── Rate Limiting ──
+
+async fn rate_limit_status_handler(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let status = state.rate_limiter.status(&agent_id).await;
+    Json(serde_json::to_value(status).unwrap_or_default())
+}
+
+async fn get_rate_limit_config_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<RateLimitConfig> {
+    let config = state.rate_limiter.get_config().await;
+    Json(config)
+}
+
+async fn update_rate_limit_config_handler(
+    State(state): State<Arc<AppState>>,
+    Json(new_config): Json<RateLimitConfig>,
+) -> Json<RateLimitConfig> {
+    state.rate_limiter.update_config(new_config.clone()).await;
+    Json(new_config)
+}
+
+// ── Threat Intelligence Feed ──
+
+async fn list_threat_indicators_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<ThreatIndicator>> {
+    Json(state.threat_feed.list_indicators())
+}
+
+async fn add_threat_indicator_handler(
+    State(state): State<Arc<AppState>>,
+    Json(indicator): Json<ThreatIndicator>,
+) -> (StatusCode, Json<ThreatIndicator>) {
+    state.threat_feed.add_indicator(indicator.clone());
+    (StatusCode::CREATED, Json(indicator))
+}
+
+async fn delete_threat_indicator_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if state.threat_feed.remove_indicator(&id) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "indicator not found"})),
+        )
+            .into_response()
+    }
+}
+
+async fn threat_intel_stats_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let stats = state.threat_feed.get_stats();
+    Json(serde_json::to_value(stats).unwrap_or_default())
+}
+
+#[derive(Deserialize)]
+struct ThreatCheckBody {
+    content: String,
+}
+
+async fn threat_intel_check_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ThreatCheckBody>,
+) -> Json<serde_json::Value> {
+    let matches = state.threat_feed.check_threats(&body.content);
+    Json(serde_json::json!({
+        "matches": matches,
+        "matched": !matches.is_empty(),
+        "count": matches.len()
+    }))
+}
+
+// ── Webhooks ──
+
+async fn list_webhooks_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<WebhookConfig>>, ArmorError> {
+    let hooks = state.webhook_manager.list().await;
+    Ok(Json(hooks))
+}
+
+async fn create_webhook_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateWebhookBody>,
+) -> Result<(StatusCode, Json<WebhookConfig>), ArmorError> {
+    let hook = state
+        .webhook_manager
+        .register(body.url, body.secret, body.event_filter)
+        .await;
+    Ok((StatusCode::CREATED, Json(hook)))
+}
+
+async fn delete_webhook_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ArmorError> {
+    state.webhook_manager.unregister(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}

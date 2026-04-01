@@ -1,0 +1,261 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use agent_armor::config::env::{AppEnv, NodeEnv, ServiceMode};
+use agent_armor::core::types::RateLimitConfig;
+use agent_armor::core::types::*;
+use agent_armor::demo::scenarios::{demo_profiles, demo_scenarios, demo_workspace_policies};
+use agent_armor::events::bus::EventBus;
+use agent_armor::events::webhooks::WebhookManager;
+use agent_armor::modules::fingerprint::behavioral::BehavioralEngine;
+use agent_armor::modules::rate_limit::limiter::RateLimiter;
+use agent_armor::modules::threat_intel::feed::ThreatFeed;
+use agent_armor::pipeline::execute_pipeline::execute_pipeline;
+use agent_armor::server::app_state::AppState;
+use agent_armor::storage::sqlite::SqliteStorage;
+use agent_armor::storage::traits::PolicyStore;
+
+/// Build a fully-wired AppState backed by an in-memory SQLite database,
+/// with demo profiles and workspace policies seeded.
+async fn build_test_state() -> Arc<AppState> {
+    let storage = SqliteStorage::new("sqlite::memory:")
+        .await
+        .expect("failed to create in-memory SQLite");
+
+    let storage = Arc::new(storage);
+
+    // Seed demo profiles
+    for profile in demo_profiles() {
+        storage
+            .upsert_profile(&profile)
+            .await
+            .expect("failed to seed profile");
+    }
+
+    // Seed demo workspace policies
+    for policy in demo_workspace_policies() {
+        storage
+            .upsert_workspace(&policy)
+            .await
+            .expect("failed to seed workspace policy");
+    }
+
+    let event_bus = EventBus::new(64);
+    let webhook_manager = Arc::new(WebhookManager::new());
+
+    let env = AppEnv {
+        port: 4010,
+        node_env: NodeEnv::Test,
+        default_mode: ServiceMode::Gateway,
+    };
+
+    Arc::new(AppState {
+        audit_store: storage.clone(),
+        review_store: storage.clone(),
+        policy_store: storage.clone(),
+        api_key_store: storage,
+        event_bus,
+        webhook_manager,
+        behavioral_engine: Arc::new(BehavioralEngine::new()),
+        rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
+        threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
+        env,
+    })
+}
+
+fn payload(pairs: &[(&str, serde_json::Value)]) -> HashMap<String, serde_json::Value> {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 1: Safe file read should be allowed
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_safe_file_read_is_allowed() {
+    let state = build_test_state().await;
+
+    let request = InspectRequest {
+        agent_id: "openclaw-builder-01".into(),
+        workspace_id: Some("ws-demo".into()),
+        framework: "openclaw".into(),
+        protocol: Some(ProtocolKind::Mcp),
+        action: ActionDetail {
+            action_type: ActionType::FileRead,
+            tool_name: "filesystem.read".into(),
+            payload: payload(&[
+                ("path", serde_json::json!("src/config.json")),
+                ("intent", serde_json::json!("read configuration")),
+            ]),
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+
+    let result = execute_pipeline(&request, &state)
+        .await
+        .expect("pipeline should succeed");
+
+    assert_eq!(
+        result.decision,
+        GovernanceDecision::Allow,
+        "safe file read should be allowed, got {:?} with findings: {:?}",
+        result.decision,
+        result.policy_findings
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 2: Shell command referencing .env should trigger Review or Block
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_shell_with_env_secret_triggers_review_or_block() {
+    let state = build_test_state().await;
+
+    let request = InspectRequest {
+        agent_id: "openclaw-builder-01".into(),
+        workspace_id: Some("ws-demo".into()),
+        framework: "openclaw".into(),
+        protocol: Some(ProtocolKind::Mcp),
+        action: ActionDetail {
+            action_type: ActionType::Shell,
+            tool_name: "terminal.exec".into(),
+            payload: payload(&[
+                ("command", serde_json::json!("cat .env && source .env")),
+                ("intent", serde_json::json!("load environment")),
+            ]),
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+
+    let result = execute_pipeline(&request, &state)
+        .await
+        .expect("pipeline should succeed");
+
+    assert!(
+        result.decision == GovernanceDecision::Review
+            || result.decision == GovernanceDecision::Block,
+        "shell referencing .env should be Review or Block, got {:?} with findings: {:?}",
+        result.decision,
+        result.policy_findings
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 3: Destructive rm -rf / should be blocked
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_destructive_command_is_blocked() {
+    let state = build_test_state().await;
+
+    let request = InspectRequest {
+        agent_id: "openclaw-builder-01".into(),
+        workspace_id: Some("ws-demo".into()),
+        framework: "openclaw".into(),
+        protocol: Some(ProtocolKind::Mcp),
+        action: ActionDetail {
+            action_type: ActionType::Shell,
+            tool_name: "terminal.exec".into(),
+            payload: payload(&[
+                ("command", serde_json::json!("rm -rf /")),
+                ("intent", serde_json::json!("cleanup old data")),
+            ]),
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+
+    let result = execute_pipeline(&request, &state)
+        .await
+        .expect("pipeline should succeed");
+
+    assert_eq!(
+        result.decision,
+        GovernanceDecision::Block,
+        "destructive rm -rf / should be blocked, got {:?} with findings: {:?}",
+        result.decision,
+        result.policy_findings
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 4: Researcher requesting unknown secret should trigger Review
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_unknown_secret_triggers_review() {
+    let state = build_test_state().await;
+
+    let request = InspectRequest {
+        agent_id: "openclaw-research-01".into(),
+        workspace_id: Some("ws-demo".into()),
+        framework: "openclaw".into(),
+        protocol: Some(ProtocolKind::Mcp),
+        action: ActionDetail {
+            action_type: ActionType::Http,
+            tool_name: "http.fetch".into(),
+            payload: payload(&[
+                ("method", serde_json::json!("POST")),
+                ("destination", serde_json::json!("hooks.slack.com")),
+                ("intent", serde_json::json!("send external summary")),
+            ]),
+        },
+        requested_secrets: Some(vec!["secretref://prod/root/aws-admin".into()]),
+        metadata: None,
+    };
+
+    let result = execute_pipeline(&request, &state)
+        .await
+        .expect("pipeline should succeed");
+
+    assert!(
+        result.decision == GovernanceDecision::Review
+            || result.decision == GovernanceDecision::Block,
+        "unknown secret request should be Review or Block, got {:?} with findings: {:?}",
+        result.decision,
+        result.policy_findings
+    );
+
+    // Verify the secret was denied in the plan
+    assert!(
+        result
+            .secret_plan
+            .denied
+            .contains(&"secretref://prod/root/aws-admin".to_string()),
+        "aws-admin secret should be in denied list, got approved: {:?}, denied: {:?}",
+        result.secret_plan.approved,
+        result.secret_plan.denied
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 5: Verify demo scenarios execute without errors
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_all_demo_scenarios_execute_successfully() {
+    let state = build_test_state().await;
+
+    let scenarios = demo_scenarios();
+    assert!(
+        !scenarios.is_empty(),
+        "demo scenarios should not be empty (ensure 'demo' feature is enabled)"
+    );
+
+    for scenario in &scenarios {
+        let result = execute_pipeline(&scenario.request, &state).await;
+        assert!(
+            result.is_ok(),
+            "scenario '{}' ({}) should not return an error, got: {:?}",
+            scenario.title,
+            scenario.step,
+            result.err()
+        );
+    }
+}

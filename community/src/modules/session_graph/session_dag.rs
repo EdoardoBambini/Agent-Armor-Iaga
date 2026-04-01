@@ -1,0 +1,717 @@
+//! LAYER 1 — Session Graph Analysis
+//!
+//! Models every agent session as a DAG (Directed Acyclic Graph).
+//! Nodes = tool calls. Edges = data flow.
+//! FSA (Finite State Automaton) per session enforces allowed transitions.
+//! Pattern matching on the DAG detects multi-step attack chains.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use once_cell::sync::Lazy;
+use serde::Serialize;
+use uuid::Uuid;
+
+// ── Types ──
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallNode {
+    pub id: String,
+    pub tool_name: String,
+    pub action_type: String,
+    pub timestamp: u64,
+    pub taint_labels: HashSet<String>,
+    pub risk_score: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataFlowEdge {
+    pub from: String,
+    pub to: String,
+    pub data_keys: Vec<String>,
+    pub taint_propagated: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FSAState {
+    Idle,
+    Reading,
+    Processing,
+    Writing,
+    NetworkEgress,
+    Blocked,
+}
+
+impl std::fmt::Display for FSAState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FSAState::Idle => write!(f, "idle"),
+            FSAState::Reading => write!(f, "reading"),
+            FSAState::Processing => write!(f, "processing"),
+            FSAState::Writing => write!(f, "writing"),
+            FSAState::NetworkEgress => write!(f, "network_egress"),
+            FSAState::Blocked => write!(f, "blocked"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionDAG {
+    pub session_id: String,
+    pub agent_id: String,
+    pub nodes: Vec<ToolCallNode>,
+    pub edges: Vec<DataFlowEdge>,
+    pub created_at: u64,
+    pub last_activity: u64,
+    pub state: FSAState,
+    pub blocked: bool,
+    pub block_reason: Option<String>,
+    /// Timestamp (ms since epoch) when the session was last blocked.
+    pub blocked_at: u64,
+    /// How many times this session has been blocked (resets are free until MAX_BLOCK_COUNT).
+    pub block_count: u32,
+}
+
+// ── Attack Signatures ──
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttackSignature {
+    pub name: String,
+    pub description: String,
+    pub severity: String,
+    pub pattern: Vec<String>,
+    pub required_taints: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttackMatch {
+    pub name: String,
+    pub severity: String,
+    pub confidence: f64,
+    pub matched_nodes: Vec<String>,
+}
+
+fn attack_signatures() -> Vec<AttackSignature> {
+    vec![
+        AttackSignature {
+            name: "data_exfiltration".into(),
+            description: "Read local/secret data then send to external network".into(),
+            severity: "critical".into(),
+            pattern: vec!["file_read".into(), "http".into()],
+            required_taints: Some(vec!["local_fs".into(), "secret".into()]),
+        },
+        AttackSignature {
+            name: "secret_exfiltration_email".into(),
+            description: "Access secrets then exfiltrate via email".into(),
+            severity: "critical".into(),
+            pattern: vec!["file_read".into(), "email".into()],
+            required_taints: Some(vec!["secret".into()]),
+        },
+        AttackSignature {
+            name: "reverse_shell_setup".into(),
+            description: "HTTP fetch followed by shell execution".into(),
+            severity: "critical".into(),
+            pattern: vec!["http".into(), "shell".into()],
+            required_taints: None,
+        },
+        AttackSignature {
+            name: "lateral_movement".into(),
+            description: "Read internal data, query DB, then network egress".into(),
+            severity: "high".into(),
+            pattern: vec!["db_query".into(), "http".into()],
+            required_taints: Some(vec!["internal_api".into()]),
+        },
+        AttackSignature {
+            name: "db_dump_exfiltration".into(),
+            description: "Database query followed by file write and network send".into(),
+            severity: "critical".into(),
+            pattern: vec!["db_query".into(), "file_write".into(), "http".into()],
+            required_taints: None,
+        },
+        AttackSignature {
+            name: "privilege_escalation_chain".into(),
+            description: "Shell commands that modify then read protected files".into(),
+            severity: "high".into(),
+            pattern: vec!["shell".into(), "file_read".into(), "shell".into()],
+            required_taints: None,
+        },
+    ]
+}
+
+// ── FSA Transitions ──
+
+struct Transition {
+    from: FSAState,
+    action: &'static str,
+    to: FSAState,
+}
+
+fn default_transitions() -> Vec<Transition> {
+    vec![
+        Transition {
+            from: FSAState::Idle,
+            action: "file_read",
+            to: FSAState::Reading,
+        },
+        Transition {
+            from: FSAState::Idle,
+            action: "db_query",
+            to: FSAState::Reading,
+        },
+        Transition {
+            from: FSAState::Idle,
+            action: "http",
+            to: FSAState::NetworkEgress,
+        },
+        Transition {
+            from: FSAState::Idle,
+            action: "shell",
+            to: FSAState::Processing,
+        },
+        Transition {
+            from: FSAState::Idle,
+            action: "custom",
+            to: FSAState::Processing,
+        },
+        Transition {
+            from: FSAState::Idle,
+            action: "email",
+            to: FSAState::NetworkEgress,
+        },
+        Transition {
+            from: FSAState::Idle,
+            action: "file_write",
+            to: FSAState::Writing,
+        },
+        Transition {
+            from: FSAState::Reading,
+            action: "file_read",
+            to: FSAState::Reading,
+        },
+        Transition {
+            from: FSAState::Reading,
+            action: "db_query",
+            to: FSAState::Reading,
+        },
+        Transition {
+            from: FSAState::Reading,
+            action: "custom",
+            to: FSAState::Processing,
+        },
+        Transition {
+            from: FSAState::Reading,
+            action: "shell",
+            to: FSAState::Processing,
+        },
+        Transition {
+            from: FSAState::Reading,
+            action: "file_write",
+            to: FSAState::Writing,
+        },
+        Transition {
+            from: FSAState::Processing,
+            action: "file_read",
+            to: FSAState::Reading,
+        },
+        Transition {
+            from: FSAState::Processing,
+            action: "file_write",
+            to: FSAState::Writing,
+        },
+        Transition {
+            from: FSAState::Processing,
+            action: "custom",
+            to: FSAState::Processing,
+        },
+        Transition {
+            from: FSAState::Processing,
+            action: "shell",
+            to: FSAState::Processing,
+        },
+        Transition {
+            from: FSAState::Processing,
+            action: "db_query",
+            to: FSAState::Reading,
+        },
+        Transition {
+            from: FSAState::Processing,
+            action: "http",
+            to: FSAState::NetworkEgress,
+        },
+        Transition {
+            from: FSAState::Writing,
+            action: "file_read",
+            to: FSAState::Reading,
+        },
+        Transition {
+            from: FSAState::Writing,
+            action: "custom",
+            to: FSAState::Processing,
+        },
+        Transition {
+            from: FSAState::Writing,
+            action: "file_write",
+            to: FSAState::Writing,
+        },
+        Transition {
+            from: FSAState::NetworkEgress,
+            action: "file_read",
+            to: FSAState::Reading,
+        },
+        Transition {
+            from: FSAState::NetworkEgress,
+            action: "custom",
+            to: FSAState::Processing,
+        },
+        Transition {
+            from: FSAState::NetworkEgress,
+            action: "http",
+            to: FSAState::NetworkEgress,
+        },
+    ]
+}
+
+// ── Session Store ──
+
+static SESSIONS: Lazy<Mutex<HashMap<String, SessionDAG>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+const MAX_SESSIONS: usize = 10_000;
+const SESSION_TTL_MS: u64 = 30 * 60 * 1000;
+/// How long a blocked session stays blocked before decaying to a
+/// "cooldown" state where new requests are evaluated with elevated
+/// scrutiny but not auto-rejected. 60 seconds.
+const BLOCK_COOLDOWN_MS: u64 = 60_000;
+/// Maximum number of times a session can be blocked before it becomes
+/// permanently blocked (no more cooldown recovery).
+const MAX_BLOCK_COUNT: u32 = 3;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn get_or_create_session(session_id: &str, agent_id: &str) -> SessionDAG {
+    let mut store = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+
+    if let Some(session) = store.get_mut(session_id) {
+        session.last_activity = now_ms();
+        return session.clone();
+    }
+
+    // Evict stale sessions
+    if store.len() >= MAX_SESSIONS {
+        let now = now_ms();
+        store.retain(|_, s| now - s.last_activity < SESSION_TTL_MS);
+    }
+
+    let session = SessionDAG {
+        session_id: session_id.to_string(),
+        agent_id: agent_id.to_string(),
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        created_at: now_ms(),
+        last_activity: now_ms(),
+        state: FSAState::Idle,
+        blocked: false,
+        block_reason: None,
+        blocked_at: 0,
+        block_count: 0,
+    };
+    store.insert(session_id.to_string(), session.clone());
+    session
+}
+
+fn save_session(session: &SessionDAG) {
+    let mut store = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    store.insert(session.session_id.clone(), session.clone());
+}
+
+// ── Analysis Result ──
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionAnalysisResult {
+    pub node_id: String,
+    pub session_id: String,
+    pub transition_allowed: bool,
+    pub previous_state: String,
+    pub new_state: String,
+    pub attacks_detected: Vec<AttackMatch>,
+    pub anomaly_score: u32,
+    pub anomaly_reasons: Vec<String>,
+}
+
+// ── Core Engine ──
+
+pub fn add_tool_call_to_session(
+    session_id: &str,
+    agent_id: &str,
+    tool_name: &str,
+    action_type: &str,
+    taint_labels: HashSet<String>,
+) -> SessionAnalysisResult {
+    let mut session = get_or_create_session(session_id, agent_id);
+
+    // ── Cooldown/decay: blocked sessions can recover after BLOCK_COOLDOWN_MS ──
+    if session.blocked {
+        let now = now_ms();
+        let elapsed = now.saturating_sub(session.blocked_at);
+
+        // Permanently blocked after MAX_BLOCK_COUNT strikes
+        if session.block_count >= MAX_BLOCK_COUNT {
+            return SessionAnalysisResult {
+                node_id: String::new(),
+                session_id: session_id.to_string(),
+                transition_allowed: false,
+                previous_state: session.state.to_string(),
+                new_state: "blocked".to_string(),
+                attacks_detected: Vec::new(),
+                anomaly_score: 100,
+                anomaly_reasons: vec![format!(
+                    "session permanently blocked after {} strikes: {}",
+                    session.block_count,
+                    session.block_reason.as_deref().unwrap_or("unknown")
+                )],
+            };
+        }
+
+        // Still within cooldown window — remain blocked
+        if elapsed < BLOCK_COOLDOWN_MS {
+            return SessionAnalysisResult {
+                node_id: String::new(),
+                session_id: session_id.to_string(),
+                transition_allowed: false,
+                previous_state: session.state.to_string(),
+                new_state: "blocked".to_string(),
+                attacks_detected: Vec::new(),
+                anomaly_score: 80,
+                anomaly_reasons: vec![format!(
+                    "session in cooldown ({:.0}s remaining): {}",
+                    (BLOCK_COOLDOWN_MS - elapsed) as f64 / 1000.0,
+                    session.block_reason.as_deref().unwrap_or("unknown")
+                )],
+            };
+        }
+
+        // Cooldown expired — transition to elevated-scrutiny state.
+        // Reset blocked flag but keep elevated anomaly via block_count.
+        session.blocked = false;
+        session.block_reason = None;
+        session.state = FSAState::Processing; // restart from Processing, not Idle
+        save_session(&session);
+    }
+
+    // Create node
+    let mut node_taints = taint_labels;
+
+    // Propagate taints from previous node
+    if let Some(prev) = session.nodes.last() {
+        for t in &prev.taint_labels {
+            node_taints.insert(t.clone());
+        }
+        session.edges.push(DataFlowEdge {
+            from: prev.id.clone(),
+            to: Uuid::new_v4().to_string(), // temporary, overwritten below
+            data_keys: vec!["implicit_sequence".into()],
+            taint_propagated: prev.taint_labels.clone(),
+        });
+    }
+
+    let node = ToolCallNode {
+        id: Uuid::new_v4().to_string(),
+        tool_name: tool_name.to_string(),
+        action_type: action_type.to_string(),
+        timestamp: now_ms(),
+        taint_labels: node_taints.clone(),
+        risk_score: 0,
+    };
+
+    // Fix edge target
+    if let Some(edge) = session.edges.last_mut() {
+        if edge.to.len() == 36 && edge.to != node.id {
+            edge.to = node.id.clone();
+        }
+    }
+
+    session.nodes.push(node.clone());
+
+    // FSA transition
+    let previous_state = session.state;
+    let (allowed, next_state) = check_transition(session.state, action_type, &node_taints);
+
+    let mut transition_allowed = true;
+    let new_state;
+
+    if !allowed {
+        transition_allowed = false;
+        new_state = FSAState::Blocked;
+        session.blocked = true;
+        session.blocked_at = now_ms();
+        session.block_count += 1;
+        session.block_reason = Some(format!(
+            "unauthorized FSA transition: {} → {}",
+            previous_state, action_type
+        ));
+    } else {
+        new_state = next_state;
+    }
+    session.state = new_state;
+
+    // Attack signature matching
+    let attacks = match_attack_signatures(&session);
+
+    if attacks.iter().any(|a| a.severity == "critical") {
+        session.blocked = true;
+        session.blocked_at = now_ms();
+        session.block_count += 1;
+        session.block_reason = Some(format!(
+            "attack pattern: {}",
+            attacks
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        session.state = FSAState::Blocked;
+        transition_allowed = false;
+    }
+
+    // Anomaly detection
+    let (anomaly_score, anomaly_reasons) = detect_anomalies(&session);
+
+    save_session(&session);
+
+    SessionAnalysisResult {
+        node_id: node.id,
+        session_id: session_id.to_string(),
+        transition_allowed,
+        previous_state: previous_state.to_string(),
+        new_state: session.state.to_string(),
+        attacks_detected: attacks,
+        anomaly_score,
+        anomaly_reasons,
+    }
+}
+
+fn check_transition(
+    current: FSAState,
+    action_type: &str,
+    taints: &HashSet<String>,
+) -> (bool, FSAState) {
+    if current == FSAState::Blocked {
+        return (false, FSAState::Blocked);
+    }
+
+    // Special: reading → network requires no sensitive taints
+    let sensitive = ["local_fs", "secret", "internal_api"];
+    if current == FSAState::Reading && (action_type == "http" || action_type == "email") {
+        if taints.iter().any(|t| sensitive.contains(&t.as_str())) {
+            return (false, FSAState::Blocked);
+        }
+        return (true, FSAState::NetworkEgress);
+    }
+
+    for t in default_transitions() {
+        if t.from == current && t.action == action_type {
+            return (true, t.to);
+        }
+    }
+
+    (false, FSAState::Blocked)
+}
+
+fn match_attack_signatures(session: &SessionDAG) -> Vec<AttackMatch> {
+    let mut matches = Vec::new();
+
+    for sig in attack_signatures() {
+        if session.nodes.len() < sig.pattern.len() {
+            continue;
+        }
+
+        // Subsequence matching
+        for start in 0..=session.nodes.len().saturating_sub(sig.pattern.len()) {
+            let mut pat_idx = 0;
+            let mut matched_nodes = Vec::new();
+            let mut all_taints = HashSet::new();
+
+            for i in start..session.nodes.len() {
+                if pat_idx >= sig.pattern.len() {
+                    break;
+                }
+                if session.nodes[i].action_type == sig.pattern[pat_idx] {
+                    matched_nodes.push(session.nodes[i].id.clone());
+                    for t in &session.nodes[i].taint_labels {
+                        all_taints.insert(t.clone());
+                    }
+                    pat_idx += 1;
+                }
+            }
+
+            if pat_idx != sig.pattern.len() {
+                continue;
+            }
+
+            // Check required taints
+            if let Some(ref req) = sig.required_taints {
+                if !req.iter().any(|t| all_taints.contains(t)) {
+                    continue;
+                }
+            }
+
+            let confidence = 0.7 + if sig.severity == "critical" { 0.2 } else { 0.1 };
+            matches.push(AttackMatch {
+                name: sig.name.clone(),
+                severity: sig.severity.clone(),
+                confidence,
+                matched_nodes,
+            });
+            break; // One match per signature
+        }
+    }
+
+    matches
+}
+
+fn detect_anomalies(session: &SessionDAG) -> (u32, Vec<String>) {
+    let mut score: u32 = 0;
+    let mut reasons = Vec::new();
+    let now = now_ms();
+
+    // Prior-block history: each previous block adds lingering suspicion
+    if session.block_count > 0 {
+        let history_penalty = (session.block_count * 15).min(45);
+        score += history_penalty;
+        reasons.push(format!(
+            "prior block history: {} strike(s) (+{})",
+            session.block_count, history_penalty
+        ));
+    }
+
+    // Burst detection
+    let recent = session
+        .nodes
+        .iter()
+        .filter(|n| now - n.timestamp < 10_000)
+        .count();
+    if recent > 15 {
+        score += 30;
+        reasons.push(format!("burst: {} calls in 10s", recent));
+    } else if recent > 8 {
+        score += 15;
+        reasons.push(format!("elevated frequency: {} calls in 10s", recent));
+    }
+
+    // Tool diversity
+    let unique_tools: HashSet<_> = session.nodes.iter().map(|n| &n.tool_name).collect();
+    if unique_tools.len() > 10 {
+        score += 20;
+        reasons.push(format!(
+            "high tool diversity: {} distinct tools",
+            unique_tools.len()
+        ));
+    }
+
+    // Taint accumulation
+    let mut all_taints = HashSet::new();
+    for n in &session.nodes {
+        for t in &n.taint_labels {
+            all_taints.insert(t.clone());
+        }
+    }
+    if all_taints.len() >= 4 {
+        score += 25;
+        reasons.push(format!(
+            "high taint accumulation: {}",
+            all_taints.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    // Depth
+    if session.nodes.len() > 50 {
+        score += 30;
+        reasons.push(format!(
+            "extremely deep session: {} calls",
+            session.nodes.len()
+        ));
+    } else if session.nodes.len() > 25 {
+        score += 15;
+        reasons.push(format!("deep session: {} calls", session.nodes.len()));
+    }
+
+    (score.min(100), reasons)
+}
+
+// ── Public Queries ──
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    pub session_id: String,
+    pub agent_id: String,
+    pub node_count: usize,
+    pub state: FSAState,
+}
+
+pub fn list_active_sessions() -> Vec<SessionInfo> {
+    let store = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    store
+        .values()
+        .map(|s| SessionInfo {
+            session_id: s.session_id.clone(),
+            agent_id: s.agent_id.clone(),
+            node_count: s.nodes.len(),
+            state: s.state,
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMetrics {
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub state: FSAState,
+    pub taint_labels: Vec<String>,
+    pub duration_ms: u64,
+}
+
+pub fn get_session_metrics(session_id: &str) -> Option<SessionMetrics> {
+    let store = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let s = store.get(session_id)?;
+    let mut taints = HashSet::new();
+    for n in &s.nodes {
+        for t in &n.taint_labels {
+            taints.insert(t.clone());
+        }
+    }
+    Some(SessionMetrics {
+        node_count: s.nodes.len(),
+        edge_count: s.edges.len(),
+        state: s.state,
+        taint_labels: taints.into_iter().collect(),
+        duration_ms: s.last_activity - s.created_at,
+    })
+}
+
+/// Prune sessions inactive for longer than `ttl_ms` milliseconds.
+/// Returns the number of sessions pruned.
+pub fn prune_stale_sessions(ttl_ms: u64) -> usize {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let mut store = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let before = store.len();
+    store.retain(|_, s| now.saturating_sub(s.last_activity) < ttl_ms);
+    before - store.len()
+}

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-armor"
+version = "0.1.0"
+description = "IAGA Agent Armor SDK — Zero-trust governance for autonomous AI agents"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "IAGA", email = "hello@iaga.tech" },
+]
+keywords = ["ai", "agents", "governance", "security", "mcp", "a2a"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "httpx>=0.25",
+]
+
+[project.optional-dependencies]
+sync = ["requests>=2.28"]
+
+[project.urls]
+Homepage = "https://github.com/iaga-tech/agent-armor"
+Documentation = "https://docs.iaga.tech/agent-armor"

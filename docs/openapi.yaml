@@ -1,0 +1,2094 @@
+openapi: 3.1.0
+info:
+  title: Agent Armor API
+  version: 0.1.0
+  description: >
+    Agent Armor is an open-source governance layer for AI agents. It intercepts
+    tool calls, evaluates risk, enforces workspace policies, and provides a
+    full audit trail across an 8-layer security stack.
+  license:
+    name: BUSL-1.1
+    url: https://spdx.org/licenses/BUSL-1.1.html
+  contact:
+    name: Agent Armor Team
+    url: https://github.com/agent-armor/agent-armor
+
+servers:
+  - url: http://localhost:4010
+    description: Local development server
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Core
+    description: Primary governance pipeline
+  - name: Audit
+    description: Immutable audit log
+  - name: Reviews
+    description: Human-in-the-loop review queue
+  - name: Profiles
+    description: Agent profile CRUD
+  - name: Workspaces
+    description: Workspace policy CRUD
+  - name: Auth
+    description: API key management
+  - name: Webhooks
+    description: Webhook registration and management
+  - name: Events
+    description: Server-sent event stream
+  - name: Sessions
+    description: "L1: Session graph tracking"
+  - name: NHI
+    description: "L3: Non-human identity management"
+  - name: Risk
+    description: "L4: Adaptive risk scoring"
+  - name: Sandbox
+    description: "L5: Sandbox execution review"
+  - name: Policy
+    description: "L6: Formal policy verification"
+  - name: Firewall
+    description: "L7: Prompt injection firewall"
+  - name: Telemetry
+    description: "L8: OpenTelemetry spans and metrics"
+  - name: Dashboard
+    description: Web dashboard UI
+  - name: ResponseScanning
+    description: Agent response output scanning for sensitive data
+  - name: RateLimiting
+    description: Per-agent rate limiting and throttling
+  - name: Fingerprinting
+    description: Behavioral agent fingerprinting
+  - name: ThreatIntel
+    description: Threat intelligence indicator management
+  - name: Demo
+    description: Demo scenarios and adapter runner
+
+paths:
+  /:
+    get:
+      operationId: getDashboard
+      summary: Render the web dashboard
+      tags: [Dashboard]
+      security: []
+      responses:
+        "200":
+          description: HTML dashboard page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /health:
+    get:
+      operationId: getHealth
+      summary: Health check
+      tags: [Core]
+      security: []
+      responses:
+        "200":
+          description: Service health status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /v1/inspect:
+    post:
+      operationId: inspectAction
+      summary: Submit an agent action for governance evaluation
+      tags: [Core]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InspectRequest"
+      responses:
+        "200":
+          description: Governance result with decision, risk, audit trail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GovernanceResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/audit:
+    get:
+      operationId: listAuditEvents
+      summary: List recent audit events
+      tags: [Audit]
+      responses:
+        "200":
+          description: Array of stored audit events (most recent 100)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StoredAuditEvent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/reviews:
+    get:
+      operationId: listReviews
+      summary: List all pending and resolved reviews
+      tags: [Reviews]
+      responses:
+        "200":
+          description: Array of review requests
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReviewRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/reviews/{id}:
+    post:
+      operationId: resolveReview
+      summary: Approve or reject a pending review
+      tags: [Reviews]
+      parameters:
+        - $ref: "#/components/parameters/ReviewId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewBody"
+      responses:
+        "200":
+          description: Updated review request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/profiles:
+    get:
+      operationId: listProfiles
+      summary: List all agent profiles
+      tags: [Profiles]
+      responses:
+        "200":
+          description: Array of agent profiles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AgentProfile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: createProfile
+      summary: Create or update an agent profile
+      tags: [Profiles]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentProfile"
+      responses:
+        "200":
+          description: Upserted agent profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentProfile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/profiles/{agent_id}:
+    get:
+      operationId: getProfile
+      summary: Get an agent profile by ID
+      tags: [Profiles]
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      responses:
+        "200":
+          description: Agent profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentProfile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    put:
+      operationId: updateProfile
+      summary: Update an agent profile
+      tags: [Profiles]
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentProfile"
+      responses:
+        "200":
+          description: Updated agent profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentProfile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: deleteProfile
+      summary: Delete an agent profile
+      tags: [Profiles]
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      responses:
+        "204":
+          description: Profile deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/workspaces:
+    get:
+      operationId: listWorkspaces
+      summary: List all workspace policies
+      tags: [Workspaces]
+      responses:
+        "200":
+          description: Array of workspace policies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkspacePolicy"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: createWorkspace
+      summary: Create or update a workspace policy
+      tags: [Workspaces]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkspacePolicy"
+      responses:
+        "200":
+          description: Upserted workspace policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspacePolicy"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/workspaces/{workspace_id}:
+    get:
+      operationId: getWorkspace
+      summary: Get a workspace policy by ID
+      tags: [Workspaces]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: Workspace policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspacePolicy"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    put:
+      operationId: updateWorkspace
+      summary: Update a workspace policy
+      tags: [Workspaces]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkspacePolicy"
+      responses:
+        "200":
+          description: Updated workspace policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspacePolicy"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: deleteWorkspace
+      summary: Delete a workspace policy
+      tags: [Workspaces]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "204":
+          description: Workspace deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/auth/keys:
+    get:
+      operationId: listApiKeys
+      summary: List all API keys (hashed, no raw keys returned)
+      tags: [Auth]
+      responses:
+        "200":
+          description: Array of API key records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ApiKeyRecord"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: createApiKey
+      summary: Generate a new API key
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateApiKeyBody"
+      responses:
+        "201":
+          description: Newly created API key (raw key shown only once)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyCreated"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/auth/keys/{id}:
+    delete:
+      operationId: deleteApiKey
+      summary: Revoke an API key
+      tags: [Auth]
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "204":
+          description: Key revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/webhooks:
+    get:
+      operationId: listWebhooks
+      summary: List all registered webhooks
+      tags: [Webhooks]
+      responses:
+        "200":
+          description: Array of webhook configurations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WebhookConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: createWebhook
+      summary: Register a new webhook endpoint
+      tags: [Webhooks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWebhookBody"
+      responses:
+        "201":
+          description: Registered webhook
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/webhooks/{id}:
+    delete:
+      operationId: deleteWebhook
+      summary: Unregister a webhook
+      tags: [Webhooks]
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "204":
+          description: Webhook removed
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/events/stream:
+    get:
+      operationId: subscribeEvents
+      summary: Subscribe to real-time governance events via SSE
+      tags: [Events]
+      responses:
+        "200":
+          description: Server-sent event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Newline-delimited SSE frames with JSON event data
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/sessions:
+    get:
+      operationId: listSessions
+      summary: List active session graphs
+      tags: [Sessions]
+      responses:
+        "200":
+          description: Array of session graph objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/sessions/{id}/metrics:
+    get:
+      operationId: getSessionMetrics
+      summary: Get metrics for a specific session
+      tags: [Sessions]
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: Session metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionMetrics"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/nhi/identities:
+    get:
+      operationId: listNhiIdentities
+      summary: List all registered non-human identities
+      tags: [NHI]
+      responses:
+        "200":
+          description: Array of NHI identity objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/NhiIdentity"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: registerNhiIdentity
+      summary: Register a new non-human identity with a cryptographic key pair
+      tags: [NHI]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterIdentityBody"
+      responses:
+        "201":
+          description: Newly registered identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NhiIdentity"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/nhi/attest:
+    post:
+      operationId: attestAgent
+      summary: Perform cryptographic attestation for an agent
+      tags: [NHI]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttestBody"
+      responses:
+        "200":
+          description: Attestation result with signature
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttestationResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/nhi/tokens:
+    post:
+      operationId: issueCapabilityToken
+      summary: Issue a time-limited capability token for an agent
+      tags: [NHI]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueTokenBody"
+      responses:
+        "201":
+          description: Issued capability token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilityToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/risk/weights:
+    get:
+      operationId: getRiskWeights
+      summary: Get current adaptive risk scoring weights
+      tags: [Risk]
+      responses:
+        "200":
+          description: Current risk weight configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskWeights"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/risk/feedback:
+    post:
+      operationId: submitRiskFeedback
+      summary: Submit feedback to adjust adaptive risk weights
+      tags: [Risk]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeedbackBody"
+      responses:
+        "200":
+          description: Feedback applied with updated weights
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskFeedbackResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/sandbox/pending:
+    get:
+      operationId: listPendingSandboxes
+      summary: List sandbox executions awaiting approval
+      tags: [Sandbox]
+      responses:
+        "200":
+          description: Array of pending sandbox entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SandboxEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/sandbox/{id}/approve:
+    post:
+      operationId: approveSandbox
+      summary: Approve a sandbox execution
+      tags: [Sandbox]
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: Approved sandbox result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/sandbox/{id}/reject:
+    post:
+      operationId: rejectSandbox
+      summary: Reject a sandbox execution
+      tags: [Sandbox]
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: Rejected sandbox result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/policy/verify/{workspace_id}:
+    get:
+      operationId: verifyPolicy
+      summary: Run formal verification on a workspace policy
+      tags: [Policy]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: Policy verification result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyVerificationResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/firewall/scan:
+    post:
+      operationId: scanPrompt
+      summary: Scan text for prompt injection attacks
+      tags: [Firewall]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FirewallScanBody"
+      responses:
+        "200":
+          description: Scan result with threat indicators
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FirewallScanResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/firewall/stats:
+    get:
+      operationId: getFirewallStats
+      summary: Get prompt firewall statistics
+      tags: [Firewall]
+      responses:
+        "200":
+          description: Firewall statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FirewallStats"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/telemetry/spans:
+    get:
+      operationId: listTelemetrySpans
+      summary: List recent OpenTelemetry spans
+      tags: [Telemetry]
+      responses:
+        "200":
+          description: Array of telemetry span objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TelemetrySpan"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/telemetry/metrics:
+    get:
+      operationId: listTelemetryMetrics
+      summary: List recent telemetry metrics
+      tags: [Telemetry]
+      responses:
+        "200":
+          description: Array of telemetry metric objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TelemetryMetric"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/telemetry/export:
+    get:
+      operationId: exportTelemetryOtlp
+      summary: Export telemetry data in OTLP JSON format
+      tags: [Telemetry]
+      responses:
+        "200":
+          description: Array of OTLP export records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OtlpExportRecord"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── Response Scanning ──
+  /v1/response/scan:
+    post:
+      operationId: scanResponse
+      summary: Scan agent response text for sensitive data (PII, credentials, secrets)
+      tags: [ResponseScanning]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResponseScanRequest"
+      responses:
+        "200":
+          description: Scan result with detected sensitive patterns
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResponseScanResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/response/patterns:
+    get:
+      operationId: listResponsePatterns
+      summary: List active sensitive data patterns used by the response scanner
+      tags: [ResponseScanning]
+      responses:
+        "200":
+          description: Array of sensitive pattern definitions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SensitivePattern"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── Rate Limiting ──
+  /v1/rate-limit/status/{agent_id}:
+    get:
+      operationId: getRateLimitStatus
+      summary: Get current rate limit status and remaining quota for an agent
+      tags: [RateLimiting]
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      responses:
+        "200":
+          description: Rate limit status including remaining quota and reset time
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateLimitStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/rate-limit/config:
+    get:
+      operationId: getRateLimitConfig
+      summary: Get the global rate limit configuration
+      tags: [RateLimiting]
+      responses:
+        "200":
+          description: Current rate limit configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateLimitConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: updateRateLimitConfig
+      summary: Update the global rate limit configuration
+      tags: [RateLimiting]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RateLimitConfig"
+      responses:
+        "200":
+          description: Updated rate limit configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateLimitConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── Agent Fingerprinting ──
+  /v1/fingerprint:
+    get:
+      operationId: listFingerprints
+      summary: List all agent behavioral fingerprints
+      tags: [Fingerprinting]
+      responses:
+        "200":
+          description: Array of agent fingerprint objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AgentFingerprint"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/fingerprint/{agent_id}:
+    get:
+      operationId: getFingerprint
+      summary: Get behavioral fingerprint for a specific agent
+      tags: [Fingerprinting]
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      responses:
+        "200":
+          description: Agent behavioral fingerprint
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentFingerprint"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── Threat Intelligence ──
+  /v1/threat-intel/indicators:
+    get:
+      operationId: listThreatIndicators
+      summary: List all threat indicators in the IOC database
+      tags: [ThreatIntel]
+      responses:
+        "200":
+          description: Array of threat indicators
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ThreatIndicator"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: addThreatIndicator
+      summary: Add a new threat indicator (IOC) to the database
+      tags: [ThreatIntel]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ThreatIndicator"
+      responses:
+        "201":
+          description: Newly added threat indicator
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThreatIndicator"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/threat-intel/indicators/{id}:
+    delete:
+      operationId: deleteThreatIndicator
+      summary: Remove a threat indicator from the database
+      tags: [ThreatIntel]
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "204":
+          description: Indicator removed
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/threat-intel/stats:
+    get:
+      operationId: getThreatIntelStats
+      summary: Get threat intelligence statistics (indicator counts, match rates)
+      tags: [ThreatIntel]
+      responses:
+        "200":
+          description: Threat intelligence statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThreatIntelStats"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/threat-intel/check:
+    post:
+      operationId: checkThreatIntel
+      summary: Check a value against known threat indicators
+      tags: [ThreatIntel]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ThreatIntelCheckRequest"
+      responses:
+        "200":
+          description: Check result with matched indicators
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThreatIntelCheckResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/demo/scenarios:
+    get:
+      operationId: listDemoScenarios
+      summary: List available demo scenarios
+      tags: [Demo]
+      responses:
+        "200":
+          description: Array of demo scenarios
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DemoScenario"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/demo/run-adapter:
+    post:
+      operationId: runDemoAdapter
+      summary: Run all demo scenarios through the governance pipeline
+      tags: [Demo]
+      responses:
+        "200":
+          description: Array of demo results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DemoResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        API key passed as a Bearer token. Generate keys via POST /v1/auth/keys.
+
+  parameters:
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Unique resource identifier
+    ReviewId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Review request identifier
+    AgentId:
+      name: agent_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Agent identifier
+    WorkspaceId:
+      name: workspace_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Workspace identifier
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Authentication required or invalid API key
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Policy violation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    # ── Error ──
+    ErrorResponse:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code
+          enum:
+            - agent_not_found
+            - workspace_not_found
+            - policy_violation
+            - storage_error
+            - auth_required
+            - invalid_api_key
+            - invalid_request
+            - review_not_found
+            - internal_error
+        message:
+          type: string
+          description: Human-readable error message
+
+    # ── Health ──
+    HealthResponse:
+      type: object
+      required: [ok, service, mode]
+      properties:
+        ok:
+          type: boolean
+        service:
+          type: string
+          example: agent-armor
+        mode:
+          type: string
+          example: community
+
+    # ── Enums ──
+    ProtocolKind:
+      type: string
+      enum: [mcp, acp, a2a, http-function, unknown]
+      description: Agent communication protocol
+
+    ActionType:
+      type: string
+      enum: [shell, file_read, file_write, http, db_query, email, custom]
+      description: Category of tool action
+
+    GovernanceDecision:
+      type: string
+      enum: [allow, review, block]
+      description: Governance pipeline decision
+
+    ReviewStatus:
+      type: string
+      enum: [not_required, pending, approved, rejected]
+      description: Human review status
+
+    AgentRole:
+      type: string
+      enum: [builder, researcher, operator]
+      description: Agent role classification
+
+    ReviewAction:
+      type: string
+      enum: [approved, rejected]
+      description: Action to take on a review
+
+    # ── Core Request / Response ──
+    ActionDetail:
+      type: object
+      required: [type, toolName, payload]
+      properties:
+        type:
+          $ref: "#/components/schemas/ActionType"
+        toolName:
+          type: string
+          description: Name of the tool being invoked
+        payload:
+          type: object
+          additionalProperties: true
+          description: Arbitrary tool parameters
+
+    InspectRequest:
+      type: object
+      required: [agentId, framework, action]
+      properties:
+        agentId:
+          type: string
+          description: Unique agent identifier
+        workspaceId:
+          type: string
+          description: Optional workspace scope
+        framework:
+          type: string
+          description: Agent framework name (e.g. langchain, autogen)
+        protocol:
+          $ref: "#/components/schemas/ProtocolKind"
+        action:
+          $ref: "#/components/schemas/ActionDetail"
+        requestedSecrets:
+          type: array
+          items:
+            type: string
+          description: Secret names the agent wants injected
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Arbitrary key-value metadata
+
+    RiskScore:
+      type: object
+      required: [score, decision, reasons]
+      properties:
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Numeric risk score (0-100)
+        decision:
+          $ref: "#/components/schemas/GovernanceDecision"
+        reasons:
+          type: array
+          items:
+            type: string
+
+    SecretInjectionPlan:
+      type: object
+      required: [approved, denied]
+      properties:
+        approved:
+          type: array
+          items:
+            type: string
+        denied:
+          type: array
+          items:
+            type: string
+
+    SchemaValidation:
+      type: object
+      required: [toolName, valid, findings]
+      properties:
+        toolName:
+          type: string
+        valid:
+          type: boolean
+        findings:
+          type: array
+          items:
+            type: string
+
+    AuditEvent:
+      type: object
+      required: [eventId, agentId, framework, actionType, toolName, decision, timestamp, reasons]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        agentId:
+          type: string
+        framework:
+          type: string
+        actionType:
+          $ref: "#/components/schemas/ActionType"
+        toolName:
+          type: string
+        decision:
+          $ref: "#/components/schemas/GovernanceDecision"
+        timestamp:
+          type: string
+          format: date-time
+        reasons:
+          type: array
+          items:
+            type: string
+
+    StoredAuditEvent:
+      type: object
+      required: [eventId, agentId, framework, actionType, toolName, decision, timestamp, reasons, reviewStatus, riskScore]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        agentId:
+          type: string
+        framework:
+          type: string
+        actionType:
+          $ref: "#/components/schemas/ActionType"
+        toolName:
+          type: string
+        decision:
+          $ref: "#/components/schemas/GovernanceDecision"
+        timestamp:
+          type: string
+          format: date-time
+        reasons:
+          type: array
+          items:
+            type: string
+        reviewStatus:
+          $ref: "#/components/schemas/ReviewStatus"
+        riskScore:
+          type: integer
+          minimum: 0
+
+    GovernanceResult:
+      type: object
+      required:
+        - protocol
+        - normalizedPayload
+        - decision
+        - reviewStatus
+        - risk
+        - secretPlan
+        - auditEvent
+        - profile
+        - workspacePolicy
+        - policyFindings
+        - schemaValidation
+      properties:
+        protocol:
+          $ref: "#/components/schemas/ProtocolKind"
+        normalizedPayload:
+          type: object
+          additionalProperties: true
+        decision:
+          $ref: "#/components/schemas/GovernanceDecision"
+        reviewStatus:
+          $ref: "#/components/schemas/ReviewStatus"
+        risk:
+          $ref: "#/components/schemas/RiskScore"
+        secretPlan:
+          $ref: "#/components/schemas/SecretInjectionPlan"
+        auditEvent:
+          $ref: "#/components/schemas/AuditEvent"
+        profile:
+          $ref: "#/components/schemas/AgentProfile"
+        workspacePolicy:
+          $ref: "#/components/schemas/WorkspacePolicy"
+        policyFindings:
+          type: array
+          items:
+            type: string
+        schemaValidation:
+          $ref: "#/components/schemas/SchemaValidation"
+        reviewRequestId:
+          type: string
+          format: uuid
+        sessionGraph:
+          description: L1 session graph data
+        taintAnalysis:
+          description: L2 taint tracking data
+        adaptiveRisk:
+          description: L4 adaptive risk scoring data
+        sandboxResult:
+          description: L5 sandbox execution result
+        injectionFirewall:
+          description: L7 injection firewall analysis
+        policyVerification:
+          description: L6 formal policy verification result
+        telemetrySpan:
+          description: L8 telemetry span reference
+
+    # ── Reviews ──
+    ReviewRequest:
+      type: object
+      required: [id, agentId, workspaceId, toolName, decision, status, riskScore, reasons, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        agentId:
+          type: string
+        workspaceId:
+          type: string
+        toolName:
+          type: string
+        decision:
+          $ref: "#/components/schemas/GovernanceDecision"
+        status:
+          type: string
+          description: Current review status (pending, approved, rejected)
+        riskScore:
+          type: integer
+          minimum: 0
+        reasons:
+          type: array
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ReviewBody:
+      type: object
+      required: [status]
+      properties:
+        status:
+          $ref: "#/components/schemas/ReviewAction"
+
+    # ── Profiles & Policies ──
+    AgentProfile:
+      type: object
+      required: [agentId, workspaceId, framework, role, approvedTools, approvedSecrets, baselineActionTypes]
+      properties:
+        agentId:
+          type: string
+        workspaceId:
+          type: string
+        framework:
+          type: string
+        role:
+          $ref: "#/components/schemas/AgentRole"
+        approvedTools:
+          type: array
+          items:
+            type: string
+        approvedSecrets:
+          type: array
+          items:
+            type: string
+        baselineActionTypes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActionType"
+
+    ToolPolicy:
+      type: object
+      required: [toolName, allowedActionTypes, maxDecision]
+      properties:
+        toolName:
+          type: string
+        allowedActionTypes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActionType"
+        maxDecision:
+          $ref: "#/components/schemas/GovernanceDecision"
+        requiresHumanReview:
+          type: boolean
+          default: false
+
+    WorkspacePolicy:
+      type: object
+      required: [workspaceId, allowedProtocols, tools, allowedDomains]
+      properties:
+        workspaceId:
+          type: string
+        allowedProtocols:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProtocolKind"
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/ToolPolicy"
+        allowedDomains:
+          type: array
+          items:
+            type: string
+
+    # ── Auth ──
+    ApiKeyRecord:
+      type: object
+      required: [id, label, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        label:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateApiKeyBody:
+      type: object
+      required: [label]
+      properties:
+        label:
+          type: string
+          description: Human-readable label for the key
+
+    ApiKeyCreated:
+      type: object
+      required: [id, key, label]
+      properties:
+        id:
+          type: string
+          format: uuid
+        key:
+          type: string
+          description: Raw API key (shown only once)
+        label:
+          type: string
+
+    # ── Webhooks ──
+    WebhookConfig:
+      type: object
+      required: [id, url, secret, eventFilter, createdAt, active]
+      properties:
+        id:
+          type: string
+          format: uuid
+        url:
+          type: string
+          format: uri
+        secret:
+          type: string
+        eventFilter:
+          type: array
+          items:
+            type: string
+            enum: [action_governed, review_created, review_resolved]
+          description: Event types to receive. Empty array means all events.
+        createdAt:
+          type: string
+          format: date-time
+        active:
+          type: boolean
+
+    CreateWebhookBody:
+      type: object
+      required: [url, secret]
+      properties:
+        url:
+          type: string
+          format: uri
+        secret:
+          type: string
+          description: Shared secret for HMAC-SHA256 signature verification
+        event_filter:
+          type: array
+          items:
+            type: string
+          default: []
+
+    # ── Sessions (L1) ──
+    SessionInfo:
+      type: object
+      properties:
+        sessionId:
+          type: string
+        agentId:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        nodeCount:
+          type: integer
+        edgeCount:
+          type: integer
+
+    SessionMetrics:
+      type: object
+      properties:
+        sessionId:
+          type: string
+        totalActions:
+          type: integer
+        avgRiskScore:
+          type: number
+          format: float
+        maxRiskScore:
+          type: integer
+        decisions:
+          type: object
+          properties:
+            allow:
+              type: integer
+            review:
+              type: integer
+            block:
+              type: integer
+
+    # ── NHI (L3) ──
+    NhiIdentity:
+      type: object
+      properties:
+        agentId:
+          type: string
+        publicKey:
+          type: string
+          description: Base64-encoded Ed25519 public key
+        workspaceId:
+          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        registeredAt:
+          type: string
+          format: date-time
+
+    RegisterIdentityBody:
+      type: object
+      required: [agentId]
+      properties:
+        agentId:
+          type: string
+        workspaceId:
+          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+          default: []
+
+    AttestBody:
+      type: object
+      required: [agentId, challenge]
+      properties:
+        agentId:
+          type: string
+        challenge:
+          type: string
+          description: Challenge string to sign
+
+    AttestationResult:
+      type: object
+      properties:
+        agentId:
+          type: string
+        challenge:
+          type: string
+        signature:
+          type: string
+          description: Base64-encoded Ed25519 signature
+        verified:
+          type: boolean
+
+    IssueTokenBody:
+      type: object
+      required: [agentId, capabilities]
+      properties:
+        agentId:
+          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        ttlSeconds:
+          type: integer
+          default: 3600
+          description: Token time-to-live in seconds
+
+    CapabilityToken:
+      type: object
+      properties:
+        tokenId:
+          type: string
+        agentId:
+          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        issuedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        signature:
+          type: string
+
+    # ── Risk (L4) ──
+    RiskWeights:
+      type: object
+      properties:
+        actionTypeWeight:
+          type: number
+          format: float
+        toolRiskWeight:
+          type: number
+          format: float
+        historyWeight:
+          type: number
+          format: float
+        contextWeight:
+          type: number
+          format: float
+      additionalProperties:
+        type: number
+
+    FeedbackBody:
+      type: object
+      required: [feedback]
+      properties:
+        feedback:
+          type: string
+          description: Feedback signal (e.g. "too_strict", "too_lenient")
+
+    RiskFeedbackResponse:
+      type: object
+      properties:
+        applied:
+          type: string
+        weights:
+          $ref: "#/components/schemas/RiskWeights"
+
+    # ── Sandbox (L5) ──
+    SandboxEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        agentId:
+          type: string
+        toolName:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        payload:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+
+    # ── Policy Verification (L6) ──
+    PolicyVerificationResult:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+        valid:
+          type: boolean
+        findings:
+          type: array
+          items:
+            type: string
+        conflictsDetected:
+          type: boolean
+
+    # ── Firewall (L7) ──
+    FirewallScanBody:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          description: Text to scan for prompt injection
+
+    FirewallScanResult:
+      type: object
+      properties:
+        clean:
+          type: boolean
+        threatLevel:
+          type: string
+          enum: [none, low, medium, high, critical]
+        findings:
+          type: array
+          items:
+            type: string
+        patternsMatched:
+          type: array
+          items:
+            type: string
+
+    FirewallStats:
+      type: object
+      properties:
+        totalScans:
+          type: integer
+        threatsDetected:
+          type: integer
+        threatsByLevel:
+          type: object
+          additionalProperties:
+            type: integer
+
+    # ── Telemetry (L8) ──
+    TelemetrySpan:
+      type: object
+      properties:
+        traceId:
+          type: string
+        spanId:
+          type: string
+        operationName:
+          type: string
+        startTime:
+          type: string
+          format: date-time
+        endTime:
+          type: string
+          format: date-time
+        durationMs:
+          type: number
+        attributes:
+          type: object
+          additionalProperties: true
+
+    TelemetryMetric:
+      type: object
+      properties:
+        name:
+          type: string
+        value:
+          type: number
+        unit:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        attributes:
+          type: object
+          additionalProperties: true
+
+    OtlpExportRecord:
+      type: object
+      properties:
+        resourceSpans:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      description: OTLP-compatible export record
+
+    # ── Demo ──
+    DemoScenario:
+      type: object
+      required: [step, title, request]
+      properties:
+        step:
+          type: string
+        title:
+          type: string
+        request:
+          $ref: "#/components/schemas/InspectRequest"
+
+    DemoResult:
+      type: object
+      required: [step, title, decision, risk]
+      properties:
+        step:
+          type: string
+        title:
+          type: string
+        decision:
+          $ref: "#/components/schemas/GovernanceDecision"
+        risk:
+          type: integer
+          minimum: 0
+
+    # ── Response Scanning ──
+    ResponseScanRequest:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          description: Agent response text to scan for sensitive data
+        agentId:
+          type: string
+          description: Optional agent ID for attribution
+
+    ResponseScanResult:
+      type: object
+      properties:
+        clean:
+          type: boolean
+          description: True if no sensitive data was detected
+        findings:
+          type: array
+          items:
+            type: object
+            properties:
+              patternName:
+                type: string
+              category:
+                type: string
+                enum: [pii, credential, secret, internal_path, custom]
+              matchCount:
+                type: integer
+              severity:
+                type: string
+                enum: [low, medium, high, critical]
+
+    SensitivePattern:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Human-readable pattern name
+        category:
+          type: string
+          enum: [pii, credential, secret, internal_path, custom]
+        description:
+          type: string
+        enabled:
+          type: boolean
+
+    # ── Rate Limiting ──
+    RateLimitStatus:
+      type: object
+      properties:
+        agentId:
+          type: string
+        allowed:
+          type: boolean
+          description: Whether the agent is currently within rate limits
+        remaining:
+          type: integer
+          description: Remaining requests in the current window
+        limit:
+          type: integer
+          description: Maximum requests per window
+        resetAt:
+          type: string
+          format: date-time
+          description: When the current rate limit window resets
+
+    RateLimitConfig:
+      type: object
+      properties:
+        requestsPerSecond:
+          type: number
+          format: float
+          description: Maximum sustained requests per second
+        burstSize:
+          type: integer
+          description: Maximum burst size above sustained rate
+        windowSeconds:
+          type: integer
+          description: Sliding window duration in seconds
+        cooldownSeconds:
+          type: integer
+          description: Cooldown period after limit is exceeded
+
+    # ── Agent Fingerprinting ──
+    AgentFingerprint:
+      type: object
+      properties:
+        agentId:
+          type: string
+        toolDistribution:
+          type: object
+          additionalProperties:
+            type: integer
+          description: Map of tool names to usage counts
+        actionTypeDistribution:
+          type: object
+          additionalProperties:
+            type: integer
+          description: Map of action types to usage counts
+        avgTimeBetweenActions:
+          type: number
+          format: float
+          description: Average time between actions in milliseconds
+        totalActions:
+          type: integer
+        firstSeenAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
+        anomalyScore:
+          type: number
+          format: float
+          description: Current anomaly score (0.0 = normal, 1.0 = highly anomalous)
+
+    # ── Threat Intelligence ──
+    ThreatIndicator:
+      type: object
+      required: [indicatorType, value]
+      properties:
+        id:
+          type: string
+          format: uuid
+        indicatorType:
+          type: string
+          enum: [ip, domain, hash, url, pattern]
+          description: Type of threat indicator
+        value:
+          type: string
+          description: The indicator value (IP address, domain, hash, etc.)
+        description:
+          type: string
+        severity:
+          type: string
+          enum: [low, medium, high, critical]
+        source:
+          type: string
+          description: Where this indicator came from
+        createdAt:
+          type: string
+          format: date-time
+
+    ThreatIntelStats:
+      type: object
+      properties:
+        totalIndicators:
+          type: integer
+        indicatorsByType:
+          type: object
+          additionalProperties:
+            type: integer
+        indicatorsBySeverity:
+          type: object
+          additionalProperties:
+            type: integer
+        totalChecks:
+          type: integer
+        totalMatches:
+          type: integer
+
+    ThreatIntelCheckRequest:
+      type: object
+      required: [value]
+      properties:
+        value:
+          type: string
+          description: Value to check against threat indicators
+        indicatorType:
+          type: string
+          enum: [ip, domain, hash, url, pattern]
+          description: Optional filter to check against specific indicator type
+
+    ThreatIntelCheckResult:
+      type: object
+      properties:
+        matched:
+          type: boolean
+        matchedIndicators:
+          type: array
+          items:
+            $ref: "#/components/schemas/ThreatIndicator"

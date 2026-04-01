@@ -1,0 +1,29 @@
+# Normalize line endings to LF on commit
+* text=auto eol=lf
+
+# Rust source
+*.rs text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+
+# Web
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# Python
+*.py text eol=lf
+
+# Docs
+*.md text eol=lf
+
+# Binary
+*.gif binary
+*.png binary
+*.jpg binary
+*.mp4 binary
+*.db binary
