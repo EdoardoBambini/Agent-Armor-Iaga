@@ -176,7 +176,6 @@ impl AuditStore for SqliteStorage {
     }
 }
 
-#[derive(sqlx::FromRow)]
 struct AuditRow {
     event_id: String,
     agent_id: String,
@@ -188,6 +187,24 @@ struct AuditRow {
     review_status: String,
     reasons: String,
     timestamp: String,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for AuditRow {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        Ok(Self {
+            event_id: row.try_get("event_id")?,
+            agent_id: row.try_get("agent_id")?,
+            framework: row.try_get("framework")?,
+            action_type: row.try_get("action_type")?,
+            tool_name: row.try_get("tool_name")?,
+            decision: row.try_get("decision")?,
+            risk_score: row.try_get("risk_score")?,
+            review_status: row.try_get("review_status")?,
+            reasons: row.try_get("reasons")?,
+            timestamp: row.try_get("timestamp")?,
+        })
+    }
 }
 
 impl AuditRow {
@@ -279,7 +296,6 @@ impl ReviewStore for SqliteStorage {
     }
 }
 
-#[derive(sqlx::FromRow)]
 struct ReviewRow {
     id: String,
     agent_id: String,
@@ -291,6 +307,24 @@ struct ReviewRow {
     reasons: String,
     created_at: String,
     updated_at: String,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ReviewRow {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        Ok(Self {
+            id: row.try_get("id")?,
+            agent_id: row.try_get("agent_id")?,
+            workspace_id: row.try_get("workspace_id")?,
+            tool_name: row.try_get("tool_name")?,
+            decision: row.try_get("decision")?,
+            status: row.try_get("status")?,
+            risk_score: row.try_get("risk_score")?,
+            reasons: row.try_get("reasons")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
 }
 
 impl ReviewRow {
@@ -446,7 +480,6 @@ impl PolicyStore for SqliteStorage {
     }
 }
 
-#[derive(sqlx::FromRow)]
 struct ProfileRow {
     agent_id: String,
     workspace_id: String,
@@ -455,6 +488,21 @@ struct ProfileRow {
     approved_tools: String,
     approved_secrets: String,
     baseline_action_types: String,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ProfileRow {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        Ok(Self {
+            agent_id: row.try_get("agent_id")?,
+            workspace_id: row.try_get("workspace_id")?,
+            framework: row.try_get("framework")?,
+            role: row.try_get("role")?,
+            approved_tools: row.try_get("approved_tools")?,
+            approved_secrets: row.try_get("approved_secrets")?,
+            baseline_action_types: row.try_get("baseline_action_types")?,
+        })
+    }
 }
 
 impl ProfileRow {
@@ -474,12 +522,23 @@ impl ProfileRow {
     }
 }
 
-#[derive(sqlx::FromRow)]
 struct WorkspaceRow {
     workspace_id: String,
     allowed_protocols: String,
     allowed_domains: String,
     tools: String,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for WorkspaceRow {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        Ok(Self {
+            workspace_id: row.try_get("workspace_id")?,
+            allowed_protocols: row.try_get("allowed_protocols")?,
+            allowed_domains: row.try_get("allowed_domains")?,
+            tools: row.try_get("tools")?,
+        })
+    }
 }
 
 impl WorkspaceRow {
@@ -556,9 +615,19 @@ impl ApiKeyStore for SqliteStorage {
     }
 }
 
-#[derive(sqlx::FromRow)]
 struct ApiKeyRow {
     id: String,
     label: String,
     created_at: String,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ApiKeyRow {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        Ok(Self {
+            id: row.try_get("id")?,
+            label: row.try_get("label")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
 }
