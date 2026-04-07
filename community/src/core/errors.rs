@@ -30,6 +30,12 @@ pub enum ArmorError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Configuration error: {0}")]
+    Config(String),
+
+    #[error("Proxy error: {0}")]
+    Proxy(String),
 }
 
 #[derive(Serialize)]
@@ -50,6 +56,8 @@ impl IntoResponse for ArmorError {
             ArmorError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
             ArmorError::ReviewNotFound(_) => (StatusCode::NOT_FOUND, "review_not_found"),
             ArmorError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+            ArmorError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "config_error"),
+            ArmorError::Proxy(_) => (StatusCode::INTERNAL_SERVER_ERROR, "proxy_error"),
         };
 
         let body = ErrorBody {
@@ -64,5 +72,17 @@ impl IntoResponse for ArmorError {
 impl From<sqlx::Error> for ArmorError {
     fn from(e: sqlx::Error) -> Self {
         ArmorError::Storage(e.to_string())
+    }
+}
+
+impl From<std::io::Error> for ArmorError {
+    fn from(e: std::io::Error) -> Self {
+        ArmorError::Config(e.to_string())
+    }
+}
+
+impl From<serde_yaml::Error> for ArmorError {
+    fn from(e: serde_yaml::Error) -> Self {
+        ArmorError::Config(e.to_string())
     }
 }

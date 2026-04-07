@@ -6,7 +6,7 @@ use agent_armor::core::types::RateLimitConfig;
 use agent_armor::core::types::*;
 use agent_armor::demo::scenarios::{demo_profiles, demo_scenarios, demo_workspace_policies};
 use agent_armor::events::bus::EventBus;
-use agent_armor::events::webhooks::WebhookManager;
+use agent_armor::events::webhooks::{DeadLetterQueue, WebhookManager};
 use agent_armor::modules::fingerprint::behavioral::BehavioralEngine;
 use agent_armor::modules::rate_limit::limiter::RateLimiter;
 use agent_armor::modules::threat_intel::feed::ThreatFeed;
@@ -41,7 +41,7 @@ async fn build_test_state() -> Arc<AppState> {
     }
 
     let event_bus = EventBus::new(64);
-    let webhook_manager = Arc::new(WebhookManager::new());
+    let webhook_manager = Arc::new(WebhookManager::new(Arc::new(DeadLetterQueue::new())));
 
     let env = AppEnv {
         port: 4010,

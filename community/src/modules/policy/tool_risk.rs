@@ -55,6 +55,24 @@ pub fn score_tool_risk(
     policy_findings: &[String],
     layers: &LayerRiskContributions,
 ) -> RiskScore {
+    score_tool_risk_with_thresholds(
+        input,
+        minimum_decision,
+        policy_findings,
+        layers,
+        THRESHOLD_BLOCK,
+        THRESHOLD_REVIEW,
+    )
+}
+
+pub fn score_tool_risk_with_thresholds(
+    input: &InspectRequest,
+    minimum_decision: GovernanceDecision,
+    policy_findings: &[String],
+    layers: &LayerRiskContributions,
+    threshold_block: u32,
+    threshold_review: u32,
+) -> RiskScore {
     let mut reasons: Vec<String> = Vec::new();
 
     let payload_text = serde_json::to_string(&input.action.payload).unwrap_or_default();
@@ -139,10 +157,9 @@ pub fn score_tool_risk(
     // while preserving granularity WITHIN each band.
     match minimum_decision {
         GovernanceDecision::Block => {
-            if score < THRESHOLD_BLOCK {
-                // Scale score into the 70-100 range proportionally
-                // A score of 0 → 70, score of 69 → 99
-                score = THRESHOLD_BLOCK + (score * 30 / 100).min(30);
+            if score < threshold_block {
+                let headroom = 100u32.saturating_sub(threshold_block);
+                score = threshold_block + (score * headroom / 100).min(headroom);
                 reasons.push(format!(
                     "escalated by security layers (raw composite: {:.0})",
                     composite
@@ -150,9 +167,9 @@ pub fn score_tool_risk(
             }
         }
         GovernanceDecision::Review => {
-            if score < THRESHOLD_REVIEW {
-                // Scale into 35-69 range
-                score = THRESHOLD_REVIEW + (score * 34 / 100).min(34);
+            if score < threshold_review {
+                let headroom = threshold_block.saturating_sub(threshold_review);
+                score = threshold_review + (score * headroom / 100).min(headroom);
                 reasons.push(format!(
                     "escalated to review by security layers (raw composite: {:.0})",
                     composite
@@ -165,9 +182,9 @@ pub fn score_tool_risk(
     score = score.min(100);
 
     // ── Final decision ──
-    let score_decision = if score >= THRESHOLD_BLOCK {
+    let score_decision = if score >= threshold_block {
         GovernanceDecision::Block
-    } else if score >= THRESHOLD_REVIEW {
+    } else if score >= threshold_review {
         GovernanceDecision::Review
     } else {
         GovernanceDecision::Allow

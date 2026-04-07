@@ -92,7 +92,7 @@ Every agent action passes through a **deterministic 8-layer security pipeline**:
 |---|-------|-------------|--------------|
 | 1 | **Protocol DPI** | Deep packet inspection for MCP, ACP, HTTP function calls. Schema validation against registered tool definitions. | `POST /v1/inspect` |
 | 2 | **Taint Tracking** | Tracks data provenance through agent execution. Detects credential leaks and exfiltration attempts. | inline (pipeline) |
-| 3 | **NHI Registry** | Non-human identity management with HMAC-SHA256 attestation. Every agent is a first-class identity. | `GET /v1/nhi/identities` |
+| 3 | **NHI Registry** | Non-human identity with real HMAC-SHA256 challenge-response attestation. Every agent is a first-class cryptographic identity. | `POST /v1/nhi/challenge` |
 | 4 | **Risk Scoring** | Adaptive 5-weight scoring model (statistical, contextual, behavioral, temporal, reputation). | `GET /v1/risk/weights` |
 | 5 | **Impact Analysis** | Pre-execution risk assessment with command analysis and impact prediction. | `GET /v1/sandbox/pending` |
 | 6 | **Policy Engine** | Workspace policy evaluation — checks tool permissions, protocol restrictions, domain allowlists. | `GET /v1/policy/verify/{workspace_id}` |
@@ -211,6 +211,8 @@ When no API keys exist, all endpoints are open (bootstrap mode).
 | `GET` | `/v1/auth/keys` | List API keys |
 | `DELETE` | `/v1/auth/keys/:id` | Revoke API key |
 | `GET` | `/v1/nhi/identities` | List agent identities |
+| `POST` | `/v1/nhi/challenge` | Create HMAC challenge for agent attestation |
+| `POST` | `/v1/nhi/verify` | Verify agent challenge-response signature |
 
 ### Profiles & Workspaces
 
@@ -269,6 +271,20 @@ When no API keys exist, all endpoints are open (bootstrap mode).
 | `GET` | `/v1/threat-intel/stats` | Get threat intelligence statistics |
 | `POST` | `/v1/threat-intel/check` | Check a value against known threat indicators |
 
+### Audit & Compliance
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/audit/export?format=json` | Export audit trail (JSON/CSV) with optional filters |
+| `GET` | `/v1/audit/stats` | Aggregate audit statistics (decisions, top agents, top tools) |
+
+### Agent Analytics
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/analytics/agents` | Summary analytics for all active agents |
+| `GET` | `/v1/analytics/agents/:id` | Detailed analytics for a specific agent |
+
 ### Events
 
 | Method | Path | Description |
@@ -277,6 +293,9 @@ When no API keys exist, all endpoints are open (bootstrap mode).
 | `POST` | `/v1/webhooks` | Register webhook |
 | `GET` | `/v1/webhooks` | List webhooks |
 | `DELETE` | `/v1/webhooks/:id` | Remove webhook |
+| `GET` | `/v1/webhooks/dlq` | List dead-letter queue entries |
+| `POST` | `/v1/webhooks/dlq/:id/retry` | Retry a failed webhook delivery |
+| `DELETE` | `/v1/webhooks/dlq/:id` | Remove DLQ entry |
 
 ### Demo
 
@@ -315,7 +334,9 @@ Create `agent-armor.config.json` in your project root:
           "allowedActionTypes": ["file_read"],
           "maxDecision": "allow"
         }
-      ]
+      ],
+      "thresholdBlock": 70,
+      "thresholdReview": 35
     }
   ],
   "vault": [
@@ -348,7 +369,7 @@ community/src/
 ├── events/
 │   ├── bus.rs                           # Event bus (broadcast)
 │   ├── sse.rs                           # Server-Sent Events
-│   └── webhooks.rs                      # HMAC-signed webhook delivery
+│   └── webhooks.rs                      # HMAC-signed webhook delivery + DLQ
 ├── modules/
 │   ├── protocol/                        # Layer 1: Protocol DPI
 │   ├── taint/                           # Layer 2: Taint Tracking
@@ -368,7 +389,7 @@ community/src/
 ├── pipeline/
 │   └── execute_pipeline.rs              # Orchestrates all 8 layers
 ├── server/
-│   ├── create_server.rs                 # Axum router (48 endpoints)
+│   ├── create_server.rs                 # Axum router (57 endpoints)
 │   └── app_state.rs                     # Shared application state
 ├── storage/
 │   ├── sqlite.rs                        # SQLite persistence
@@ -417,11 +438,11 @@ community/src/
 
 | Decision | Risk Score | Meaning |
 |---|---|---|
-| `allow` | 0--34 | Action is safe, execute immediately |
-| `review` | 35--69 | Requires human approval before execution |
-| `block` | 70--100 | Action denied, too risky |
+| `allow` | 0 -- threshold_review | Action is safe, execute immediately |
+| `review` | threshold_review -- threshold_block | Requires human approval before execution |
+| `block` | threshold_block -- 100 | Action denied, too risky |
 
-Risk scores are computed as a **weighted composite** across all 8 security layers — not a binary flag. A `curl | sh` (score 88) is quantifiably more dangerous than a `chmod 777` (score 82), which is more dangerous than a prompt injection attempt (score 76).
+Thresholds are **configurable per workspace** (defaults: review=35, block=70). Risk scores are computed as a **weighted composite** across all 8 security layers — not a binary flag. A `curl | sh` (score 88) is quantifiably more dangerous than a `chmod 777` (score 82), which is more dangerous than a prompt injection attempt (score 76).
 
 ## Case Study: 99.8% Accuracy on 800 Requests
 

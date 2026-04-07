@@ -12,7 +12,7 @@ dist/
 npm-debug.log*
 Thumbs.db
 
-# Claude Code local files
+# Local development files
 .agents/
 skills-lock.json
 

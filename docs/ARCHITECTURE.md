@@ -21,12 +21,15 @@ Request → DPI → Taint → NHI → Risk → Sandbox → Policy → Firewall �
 ### Layer 3: Non-Human Identity Registry
 - Every agent gets a cryptographic identity (HMAC-SHA256)
 - Key pair generation and storage
-- Signed attestation for agent actions
+- Real challenge-response attestation: server issues nonce, agent signs with HMAC-SHA256, server verifies
+- Challenge TTL (60s) with automatic pruning of expired challenges
+- Backwards-compatible simulated attestation for agents that haven't upgraded
 
 ### Layer 4: Adaptive Risk Scoring
 - 5-weight model: statistical, contextual, behavioral, temporal, reputation
 - Weights are adjustable per deployment
 - Produces a 0-100 risk score that drives the governance decision
+- Configurable thresholds per workspace (threshold_block, threshold_review) — different environments can have different risk tolerances
 
 ### Layer 5: Sandbox Execution
 - Isolates tool execution in a controlled environment
@@ -47,6 +50,7 @@ Request → DPI → Taint → NHI → Risk → Sandbox → Policy → Firewall �
 - OpenTelemetry-compatible span emission
 - Real-time SSE event stream for dashboards
 - HMAC-signed webhook delivery to external systems
+- Dead letter queue (DLQ) for failed webhook deliveries with manual retry
 
 ## Advanced Modules (Tier 2)
 
@@ -78,6 +82,23 @@ These modules extend the core pipeline with production-hardening capabilities.
 - Check endpoint evaluates agent action payloads against known indicators
 - Statistics endpoint reports match counts and indicator coverage
 - Indicators can be added, listed, and removed via the REST API
+
+## Operational Features (v0.2.0)
+
+### Audit Export & Compliance
+- JSON and CSV export of the full audit trail with filtering (agent_id, date range, decision type)
+- Aggregate statistics: decision breakdown, top agents, top tools
+- Designed for SIEM ingestion and compliance reporting
+
+### Agent Analytics
+- Per-agent operational visibility: total requests, decision breakdown, average risk score
+- Top tools used, last activity timestamp, trust score
+- Summary endpoint for all agents + detail endpoint per agent
+
+### Webhook Dead Letter Queue
+- Failed webhook deliveries (after exponential backoff retries) are stored in a DLQ
+- List, retry, and delete DLQ entries via REST API
+- Prevents silent data loss from transient webhook failures
 
 ## Deployment Modes
 

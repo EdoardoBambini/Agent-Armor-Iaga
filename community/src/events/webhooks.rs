@@ -10,6 +10,67 @@ use crate::core::errors::ArmorError;
 
 type HmacSha256 = Hmac<Sha256>;
 
+// ── Dead Letter Queue ──
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeadLetterEntry {
+    pub id: String,
+    pub webhook_id: String,
+    pub webhook_url: String,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub error: String,
+    pub attempts: u32,
+    pub failed_at: String,
+}
+
+pub struct DeadLetterQueue {
+    entries: RwLock<Vec<DeadLetterEntry>>,
+}
+
+impl Default for DeadLetterQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeadLetterQueue {
+    pub fn new() -> Self {
+        Self {
+            entries: RwLock::new(Vec::new()),
+        }
+    }
+
+    pub async fn push(&self, entry: DeadLetterEntry) {
+        let mut entries = self.entries.write().await;
+        // Keep max 1000 entries
+        if entries.len() >= 1000 {
+            entries.remove(0);
+        }
+        entries.push(entry);
+    }
+
+    pub async fn list(&self) -> Vec<DeadLetterEntry> {
+        self.entries.read().await.clone()
+    }
+
+    pub async fn remove(&self, id: &str) -> bool {
+        let mut entries = self.entries.write().await;
+        let before = entries.len();
+        entries.retain(|e| e.id != id);
+        entries.len() < before
+    }
+
+    pub async fn take(&self, id: &str) -> Option<DeadLetterEntry> {
+        let mut entries = self.entries.write().await;
+        entries
+            .iter()
+            .position(|e| e.id == id)
+            .map(|pos| entries.remove(pos))
+    }
+}
+
 /// A registered webhook endpoint.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,23 +90,23 @@ pub struct WebhookConfig {
 pub struct WebhookManager {
     hooks: RwLock<Vec<WebhookConfig>>,
     client: reqwest::Client,
-}
-
-impl Default for WebhookManager {
-    fn default() -> Self {
-        Self::new()
-    }
+    dlq: Arc<DeadLetterQueue>,
 }
 
 impl WebhookManager {
-    pub fn new() -> Self {
+    pub fn new(dlq: Arc<DeadLetterQueue>) -> Self {
         Self {
             hooks: RwLock::new(Vec::new()),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
                 .unwrap_or_default(),
+            dlq,
         }
+    }
+
+    pub fn dlq(&self) -> &Arc<DeadLetterQueue> {
+        &self.dlq
     }
 
     pub async fn register(
@@ -99,11 +160,51 @@ impl WebhookManager {
             let client = self.client.clone();
             let event = event.clone();
             let hook = hook.clone();
+            let dlq = self.dlq.clone();
 
-            // Fire-and-forget with retry
+            // Fire-and-forget with retry, failed deliveries go to DLQ
             tokio::spawn(async move {
-                deliver_with_retry(&client, &hook, &event, 3).await;
+                deliver_with_retry(&client, &hook, &event, 3, &dlq).await;
             });
+        }
+    }
+
+    /// Retry a dead-letter entry. Returns the delivery result.
+    pub async fn retry_dlq_entry(&self, entry_id: &str) -> Result<(), ArmorError> {
+        let entry = self.dlq.take(entry_id).await.ok_or_else(|| {
+            ArmorError::InvalidRequest(format!("DLQ entry not found: {entry_id}"))
+        })?;
+
+        // Find the webhook config
+        let hooks = self.hooks.read().await;
+        let hook = hooks.iter().find(|h| h.id == entry.webhook_id).cloned();
+        drop(hooks);
+
+        let hook = hook.ok_or_else(|| {
+            ArmorError::InvalidRequest(format!("Webhook {} no longer registered", entry.webhook_id))
+        })?;
+
+        // Re-serialize event from stored payload
+        let payload = serde_json::to_vec(&entry.payload).unwrap_or_default();
+        let signature = sign_payload(&hook.secret, &payload);
+
+        let result = self
+            .client
+            .post(&hook.url)
+            .header("Content-Type", "application/json")
+            .header("X-Armor-Signature", &signature)
+            .header("X-Armor-Event", &entry.event_type)
+            .body(payload)
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) if resp.status().is_success() => Ok(()),
+            Ok(resp) => Err(ArmorError::Internal(format!(
+                "Retry failed with status {}",
+                resp.status()
+            ))),
+            Err(e) => Err(ArmorError::Internal(format!("Retry failed: {e}"))),
         }
     }
 }
@@ -129,6 +230,7 @@ async fn deliver_with_retry(
     hook: &WebhookConfig,
     event: &ArmorEvent,
     max_retries: u32,
+    dlq: &DeadLetterQueue,
 ) {
     let payload = match serde_json::to_vec(event) {
         Ok(p) => p,
@@ -139,6 +241,7 @@ async fn deliver_with_retry(
     };
 
     let signature = sign_payload(&hook.secret, &payload);
+    let mut last_error = String::new();
 
     for attempt in 0..=max_retries {
         let result = client
@@ -160,6 +263,7 @@ async fn deliver_with_retry(
                 return;
             }
             Ok(resp) => {
+                last_error = format!("HTTP {}", resp.status());
                 tracing::warn!(
                     webhook_id = %hook.id,
                     status = %resp.status(),
@@ -168,6 +272,7 @@ async fn deliver_with_retry(
                 );
             }
             Err(e) => {
+                last_error = e.to_string();
                 tracing::warn!(
                     webhook_id = %hook.id,
                     error = %e,
@@ -178,16 +283,28 @@ async fn deliver_with_retry(
         }
 
         if attempt < max_retries {
-            // Exponential backoff: 1s, 2s, 4s
             let delay = std::time::Duration::from_secs(1 << attempt);
             tokio::time::sleep(delay).await;
         }
     }
 
+    // All retries exhausted — send to dead letter queue
+    let entry = DeadLetterEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        webhook_id: hook.id.clone(),
+        webhook_url: hook.url.clone(),
+        event_type: event_type_name(event).to_string(),
+        payload: serde_json::to_value(event).unwrap_or_default(),
+        error: last_error,
+        attempts: max_retries + 1,
+        failed_at: Utc::now().to_rfc3339(),
+    };
+    dlq.push(entry).await;
+
     tracing::error!(
         webhook_id = %hook.id,
         url = %hook.url,
-        "Webhook delivery failed after all retries"
+        "Webhook delivery failed after all retries — added to DLQ"
     );
 }
 

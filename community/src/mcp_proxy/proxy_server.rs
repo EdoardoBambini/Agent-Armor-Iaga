@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
+use crate::core::errors::ArmorError;
 use crate::server::app_state::AppState;
 
 use super::protocol::*;
@@ -23,7 +24,7 @@ pub struct McpProxyConfig {
 
 /// Run the MCP proxy: reads JSON-RPC from stdin, governs tools/call,
 /// forwards to downstream MCP server, returns responses to stdout.
-pub async fn run_mcp_proxy(config: McpProxyConfig, state: Arc<AppState>) -> Result<(), String> {
+pub async fn run_mcp_proxy(config: McpProxyConfig, state: Arc<AppState>) -> Result<(), ArmorError> {
     tracing::info!(
         agent_id = %config.agent_id,
         downstream = %config.downstream_command,
@@ -35,11 +36,11 @@ pub async fn run_mcp_proxy(config: McpProxyConfig, state: Arc<AppState>) -> Resu
     let downstream_stdin = downstream
         .stdin
         .take()
-        .ok_or("Failed to capture downstream stdin")?;
+        .ok_or_else(|| ArmorError::Proxy("Failed to capture downstream stdin".into()))?;
     let downstream_stdout = downstream
         .stdout
         .take()
-        .ok_or("Failed to capture downstream stdout")?;
+        .ok_or_else(|| ArmorError::Proxy("Failed to capture downstream stdout".into()))?;
 
     let mut downstream_writer = downstream_stdin;
     let mut downstream_reader = BufReader::new(downstream_stdout).lines();
@@ -112,7 +113,7 @@ pub async fn run_mcp_proxy(config: McpProxyConfig, state: Arc<AppState>) -> Resu
     Ok(())
 }
 
-fn spawn_downstream(config: &McpProxyConfig) -> Result<Child, String> {
+fn spawn_downstream(config: &McpProxyConfig) -> Result<Child, ArmorError> {
     let mut cmd = Command::new(&config.downstream_command);
     cmd.args(&config.downstream_args)
         .envs(&config.downstream_env)
@@ -121,10 +122,10 @@ fn spawn_downstream(config: &McpProxyConfig) -> Result<Child, String> {
         .stderr(std::process::Stdio::inherit());
 
     cmd.spawn().map_err(|e| {
-        format!(
+        ArmorError::Proxy(format!(
             "Failed to spawn downstream MCP server '{}': {e}",
             config.downstream_command
-        )
+        ))
     })
 }
 

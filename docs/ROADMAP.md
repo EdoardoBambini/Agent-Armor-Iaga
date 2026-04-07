@@ -28,13 +28,24 @@
 - [x] Agent fingerprinting — behavioral profiling and anomaly detection
 - [x] Threat intelligence — IOC feed with indicator management and real-time checking
 
+## Phase 2.7 — v0.2.0 Release (Done)
+
+- [x] Real NHI challenge-response attestation (HMAC-SHA256 signed nonces)
+- [x] Configurable risk thresholds per workspace (threshold_block, threshold_review)
+- [x] Audit export endpoints (JSON/CSV) with filtering
+- [x] Audit statistics endpoint (decision breakdown, top agents/tools)
+- [x] Agent analytics endpoints (per-agent operational visibility)
+- [x] Webhook dead letter queue (DLQ) with retry
+- [x] Proper error types (ArmorError::Config, ArmorError::Proxy)
+- [x] Test coverage for Protocol DPI, NHI, Sandbox, Telemetry layers
+
 ## Phase 3 — Production Hardening
 
 - [ ] ACP protocol support
 - [ ] Persistent storage migration tooling
 - [x] Rate limiting and throttling
 - [ ] Structured logging with log levels
-- [ ] Graceful shutdown and health probes
+- [x] Graceful shutdown and health probes
 - [x] Docker image and Helm chart
 - [x] CI/CD pipeline (GitHub Actions)
 

@@ -10,6 +10,15 @@ pub use async_trait::async_trait as storage_async_trait;
 pub trait AuditStore: Send + Sync {
     async fn append(&self, event: &StoredAuditEvent) -> Result<(), ArmorError>;
     async fn list(&self, limit: u32) -> Result<Vec<StoredAuditEvent>, ArmorError>;
+    async fn list_filtered(
+        &self,
+        filter: &AuditExportFilter,
+    ) -> Result<Vec<StoredAuditEvent>, ArmorError>;
+    async fn stats(&self) -> Result<AuditStats, ArmorError>;
+    async fn agent_analytics(
+        &self,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<AgentAnalytics>, ArmorError>;
 }
 
 #[async_trait]

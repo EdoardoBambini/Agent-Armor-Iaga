@@ -59,6 +59,8 @@ pub fn demo_workspace_policies() -> Vec<WorkspacePolicy> {
                 requires_human_review: true,
             },
         ],
+        threshold_block: 70,
+        threshold_review: 35,
     }]
 }
 

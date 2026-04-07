@@ -82,6 +82,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/v1/inspect", post(inspect_handler))
         // Audit
         .route("/v1/audit", get(audit_handler))
+        // Audit export & stats
+        .route("/v1/audit/export", get(audit_export_handler))
+        .route("/v1/audit/stats", get(audit_stats_handler))
+        // Analytics
+        .route("/v1/analytics/agents", get(analytics_agents_handler))
+        .route(
+            "/v1/analytics/agents/{agent_id}",
+            get(analytics_agent_handler),
+        )
         // Reviews
         .route("/v1/reviews", get(reviews_handler))
         .route("/v1/reviews/{id}", post(review_action_handler))
@@ -111,6 +120,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/v1/webhooks", get(list_webhooks_handler))
         .route("/v1/webhooks", post(create_webhook_handler))
         .route("/v1/webhooks/{id}", delete(delete_webhook_handler))
+        // Webhook Dead Letter Queue
+        .route("/v1/webhooks/dlq", get(list_dlq_handler))
+        .route("/v1/webhooks/dlq/{id}/retry", post(retry_dlq_handler))
+        .route("/v1/webhooks/dlq/{id}", delete(delete_dlq_handler))
         // SSE event stream
         .route("/v1/events/stream", get(sse_handler))
         // ── 8-Layer Security Stack ──
@@ -122,6 +135,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/v1/nhi/identities", get(list_identities_handler))
         .route("/v1/nhi/identities", post(register_identity_handler))
         .route("/v1/nhi/attest", post(attest_handler))
+        .route("/v1/nhi/challenge", post(create_challenge_handler))
+        .route("/v1/nhi/verify", post(verify_attestation_handler))
         .route("/v1/nhi/tokens", post(issue_token_handler))
         // L4: Risk Scoring
         .route("/v1/risk/weights", get(risk_weights_handler))
@@ -229,6 +244,100 @@ async fn audit_handler(
 ) -> Result<Json<Vec<StoredAuditEvent>>, ArmorError> {
     let events = state.audit_store.list(100).await?;
     Ok(Json(events))
+}
+
+// ── Audit Export & Stats ──
+
+#[derive(Deserialize)]
+struct AuditExportQuery {
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    decision: Option<String>,
+    #[serde(default)]
+    from_date: Option<String>,
+    #[serde(default)]
+    to_date: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+async fn audit_export_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<AuditExportQuery>,
+) -> Result<impl IntoResponse, ArmorError> {
+    let filter = AuditExportFilter {
+        agent_id: query.agent_id,
+        decision: query.decision,
+        from_date: query.from_date,
+        to_date: query.to_date,
+        limit: query.limit,
+    };
+
+    let events = state.audit_store.list_filtered(&filter).await?;
+
+    match query.format.as_deref() {
+        Some("csv") => {
+            let mut csv = String::from("event_id,agent_id,framework,action_type,tool_name,decision,risk_score,review_status,timestamp\n");
+            for e in &events {
+                let at = serde_json::to_value(e.action_type)
+                    .unwrap_or_default()
+                    .as_str()
+                    .unwrap_or("custom")
+                    .to_string();
+                let dec = serde_json::to_value(e.decision)
+                    .unwrap_or_default()
+                    .as_str()
+                    .unwrap_or("allow")
+                    .to_string();
+                let rs = serde_json::to_value(e.review_status)
+                    .unwrap_or_default()
+                    .as_str()
+                    .unwrap_or("not_required")
+                    .to_string();
+                csv.push_str(&format!(
+                    "{},{},{},{},{},{},{},{},{}\n",
+                    e.event_id,
+                    e.agent_id,
+                    e.framework,
+                    at,
+                    e.tool_name,
+                    dec,
+                    e.risk_score,
+                    rs,
+                    e.timestamp
+                ));
+            }
+            Ok(([(axum::http::header::CONTENT_TYPE, "text/csv")], csv).into_response())
+        }
+        _ => Ok(Json(events).into_response()),
+    }
+}
+
+async fn audit_stats_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<AuditStats>, ArmorError> {
+    let stats = state.audit_store.stats().await?;
+    Ok(Json(stats))
+}
+
+// ── Analytics ──
+
+async fn analytics_agents_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<AgentAnalytics>>, ArmorError> {
+    let analytics = state.audit_store.agent_analytics(None).await?;
+    Ok(Json(analytics))
+}
+
+async fn analytics_agent_handler(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Vec<AgentAnalytics>>, ArmorError> {
+    let analytics = state.audit_store.agent_analytics(Some(&agent_id)).await?;
+    Ok(Json(analytics))
 }
 
 // ── Reviews ──
@@ -462,6 +571,41 @@ struct AttestBody {
 
 async fn attest_handler(Json(body): Json<AttestBody>) -> Json<serde_json::Value> {
     let result = crypto_identity::attest_agent(&body.agent_id, &body.challenge);
+    Json(serde_json::to_value(result).unwrap_or_default())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateChallengeBody {
+    agent_id: String,
+}
+
+async fn create_challenge_handler(Json(body): Json<CreateChallengeBody>) -> impl IntoResponse {
+    match crypto_identity::create_challenge(&body.agent_id) {
+        Some(challenge) => (
+            StatusCode::CREATED,
+            Json(serde_json::to_value(challenge).unwrap_or_default()),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "agent not registered"})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VerifyAttestBody {
+    agent_id: String,
+    challenge_id: String,
+    signature: String,
+}
+
+async fn verify_attestation_handler(Json(body): Json<VerifyAttestBody>) -> Json<serde_json::Value> {
+    let result =
+        crypto_identity::verify_attestation(&body.agent_id, &body.challenge_id, &body.signature);
     Json(serde_json::to_value(result).unwrap_or_default())
 }
 
@@ -777,4 +921,36 @@ async fn delete_webhook_handler(
 ) -> Result<StatusCode, ArmorError> {
     state.webhook_manager.unregister(&id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Webhook DLQ ──
+
+async fn list_dlq_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<crate::events::webhooks::DeadLetterEntry>> {
+    let entries = state.webhook_manager.dlq().list().await;
+    Json(entries)
+}
+
+async fn retry_dlq_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ArmorError> {
+    state.webhook_manager.retry_dlq_entry(&id).await?;
+    Ok(StatusCode::OK)
+}
+
+async fn delete_dlq_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if state.webhook_manager.dlq().remove(&id).await {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "DLQ entry not found"})),
+        )
+            .into_response()
+    }
 }

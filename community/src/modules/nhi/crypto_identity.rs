@@ -3,9 +3,10 @@
 //! SPIFFE-style identity for agents, HMAC-SHA256 attestation,
 //! capability tokens with expiry, and mutual verification.
 //!
-//! **v0.1 limitations:** Attestation is simulated server-side (the server
-//! signs on behalf of the agent). Real agent-side challenge-response signing
-//! is planned for v0.2 when the agent SDKs support it.
+//! **v0.2:** Real challenge-response attestation. The server issues a
+//! time-limited nonce, the agent signs it with its derived HMAC key,
+//! and the server verifies the signature. Simulated mode is preserved
+//! for backwards compatibility.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -13,7 +14,7 @@ use std::sync::Mutex;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use once_cell::sync::Lazy;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use uuid::Uuid;
 
@@ -59,6 +60,24 @@ pub struct AttestationResult {
     pub spiffe_id: String,
     pub trust_score: f64,
     pub reason: String,
+    /// "simulated" (v0.1 compat) or "verified" (real challenge-response)
+    pub mode: String,
+}
+
+// ── Challenge-Response Types ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingChallenge {
+    pub challenge_id: String,
+    pub agent_id: String,
+    pub nonce: String,
+    pub expires_at: String,
+}
+
+struct StoredChallenge {
+    challenge: PendingChallenge,
+    created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,6 +94,8 @@ pub struct MutualAttestationResult {
 static IDENTITIES: Lazy<Mutex<HashMap<String, StoredIdentity>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static TOKENS: Lazy<Mutex<HashMap<String, CapabilityToken>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static CHALLENGES: Lazy<Mutex<HashMap<String, StoredChallenge>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 // ── Key Derivation ──
@@ -185,16 +206,12 @@ pub fn list_identities() -> Vec<AgentIdentity> {
 
 // ── Attestation ──
 
-/// Attest an agent via challenge-response.
+/// Attest an agent via simulated challenge-response (v0.1 backwards compatibility).
 ///
-/// **NOTE:** In v0.1 this performs a *simulated* attestation — the server
-/// signs the challenge on behalf of the agent. Real challenge-response
-/// (where the agent signs and returns the signature) will land in v0.2.
+/// For real attestation, use `create_challenge()` + `verify_attestation()`.
 pub fn attest_agent(agent_id: &str, challenge: &str) -> AttestationResult {
     let store = IDENTITIES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(stored) = store.get(agent_id) {
-        // Simulated: server verifies its own signature as a placeholder
-        // for real agent-side signing (see roadmap for v0.2 agent SDK attestation)
         let expected_sig = sign(&stored.secret_key, challenge);
         let verified = verify_signature(&stored.secret_key, challenge, &expected_sig);
         AttestationResult {
@@ -202,7 +219,8 @@ pub fn attest_agent(agent_id: &str, challenge: &str) -> AttestationResult {
             verified,
             spiffe_id: stored.identity.spiffe_id.clone(),
             trust_score: stored.identity.trust_score,
-            reason: "simulated attestation (v0.1) — agent SDK signing in v0.2".into(),
+            reason: "simulated attestation — use /v1/nhi/challenge for real verification".into(),
+            mode: "simulated".into(),
         }
     } else {
         AttestationResult {
@@ -211,8 +229,147 @@ pub fn attest_agent(agent_id: &str, challenge: &str) -> AttestationResult {
             spiffe_id: String::new(),
             trust_score: 0.0,
             reason: "unknown agent — no identity registered".into(),
+            mode: "simulated".into(),
         }
     }
+}
+
+// ── Real Challenge-Response Attestation (v0.2) ──
+
+/// Create a time-limited challenge for an agent to sign.
+/// Returns None if the agent is not registered.
+pub fn create_challenge(agent_id: &str) -> Option<PendingChallenge> {
+    let store = IDENTITIES.lock().unwrap_or_else(|e| e.into_inner());
+    if !store.contains_key(agent_id) {
+        return None;
+    }
+    drop(store);
+
+    let challenge_id = Uuid::new_v4().to_string();
+    let nonce = Uuid::new_v4().to_string();
+    let expires = Utc::now() + chrono::Duration::seconds(60);
+
+    let challenge = PendingChallenge {
+        challenge_id: challenge_id.clone(),
+        agent_id: agent_id.to_string(),
+        nonce: nonce.clone(),
+        expires_at: expires.to_rfc3339(),
+    };
+
+    let stored = StoredChallenge {
+        challenge: challenge.clone(),
+        created_at: Utc::now().timestamp(),
+    };
+
+    CHALLENGES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(challenge_id, stored);
+
+    Some(challenge)
+}
+
+/// Verify an agent's signature against a previously issued challenge.
+///
+/// The agent must sign the nonce with its HMAC-SHA256 derived key and
+/// return the hex-encoded signature.
+pub fn verify_attestation(
+    agent_id: &str,
+    challenge_id: &str,
+    signature: &str,
+) -> AttestationResult {
+    // Look up the challenge
+    let mut challenges = CHALLENGES.lock().unwrap_or_else(|e| e.into_inner());
+    let stored_challenge = match challenges.remove(challenge_id) {
+        Some(sc) => sc,
+        None => {
+            return AttestationResult {
+                agent_id: agent_id.to_string(),
+                verified: false,
+                spiffe_id: String::new(),
+                trust_score: 0.0,
+                reason: "challenge not found or already consumed".into(),
+                mode: "verified".into(),
+            };
+        }
+    };
+    drop(challenges);
+
+    // Check challenge belongs to this agent
+    if stored_challenge.challenge.agent_id != agent_id {
+        return AttestationResult {
+            agent_id: agent_id.to_string(),
+            verified: false,
+            spiffe_id: String::new(),
+            trust_score: 0.0,
+            reason: "challenge was issued for a different agent".into(),
+            mode: "verified".into(),
+        };
+    }
+
+    // Check expiry
+    if let Ok(expires) =
+        chrono::DateTime::parse_from_rfc3339(&stored_challenge.challenge.expires_at)
+    {
+        if Utc::now() > expires {
+            return AttestationResult {
+                agent_id: agent_id.to_string(),
+                verified: false,
+                spiffe_id: String::new(),
+                trust_score: 0.0,
+                reason: "challenge expired".into(),
+                mode: "verified".into(),
+            };
+        }
+    }
+
+    // Verify signature
+    let identities = IDENTITIES.lock().unwrap_or_else(|e| e.into_inner());
+    match identities.get(agent_id) {
+        Some(stored) => {
+            let verified = verify_signature(
+                &stored.secret_key,
+                &stored_challenge.challenge.nonce,
+                signature,
+            );
+            AttestationResult {
+                agent_id: agent_id.to_string(),
+                verified,
+                spiffe_id: stored.identity.spiffe_id.clone(),
+                trust_score: stored.identity.trust_score,
+                reason: if verified {
+                    "challenge-response verified successfully".into()
+                } else {
+                    "signature verification failed".into()
+                },
+                mode: "verified".into(),
+            }
+        }
+        None => AttestationResult {
+            agent_id: agent_id.to_string(),
+            verified: false,
+            spiffe_id: String::new(),
+            trust_score: 0.0,
+            reason: "unknown agent — no identity registered".into(),
+            mode: "verified".into(),
+        },
+    }
+}
+
+/// Prune expired challenges. Returns the number of pruned entries.
+pub fn prune_expired_challenges() -> usize {
+    let now = Utc::now().timestamp();
+    let mut challenges = CHALLENGES.lock().unwrap_or_else(|e| e.into_inner());
+    let before = challenges.len();
+    challenges.retain(|_, sc| now - sc.created_at < 60);
+    before - challenges.len()
+}
+
+/// Get the secret key for an agent (for SDK use in test/dev).
+/// Returns the hex-encoded HMAC key that the agent should use to sign challenges.
+pub fn get_agent_secret_hex(agent_id: &str) -> Option<String> {
+    let store = IDENTITIES.lock().unwrap_or_else(|e| e.into_inner());
+    store.get(agent_id).map(|s| hex::encode(&s.secret_key))
 }
 
 pub fn mutual_attest(initiator_id: &str, responder_id: &str) -> MutualAttestationResult {

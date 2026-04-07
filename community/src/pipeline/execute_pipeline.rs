@@ -12,7 +12,7 @@ use crate::modules::injection_firewall::prompt_firewall;
 use crate::modules::nhi::crypto_identity;
 use crate::modules::policy::evaluate_policy::evaluate_policy;
 use crate::modules::policy::formal_verify;
-use crate::modules::policy::tool_risk::{score_tool_risk, LayerRiskContributions};
+use crate::modules::policy::tool_risk::{score_tool_risk_with_thresholds, LayerRiskContributions};
 use crate::modules::protocol::detect_protocol::detect_protocol;
 use crate::modules::protocol::mcp_parser::normalize_mcp_payload;
 use crate::modules::protocol::validate_mcp_tool::validate_mcp_tool;
@@ -442,7 +442,14 @@ pub async fn execute_pipeline(
         minimum_decision = GovernanceDecision::Block;
     }
 
-    let risk = score_tool_risk(input, minimum_decision, &policy_findings, &layer_risks);
+    let risk = score_tool_risk_with_thresholds(
+        input,
+        minimum_decision,
+        &policy_findings,
+        &layer_risks,
+        workspace_policy.threshold_block,
+        workspace_policy.threshold_review,
+    );
 
     // Build audit event
     let mut reasons = risk.reasons.clone();

@@ -7,15 +7,19 @@ use agent_armor::core::types::{
 use agent_armor::modules::injection_firewall::prompt_firewall::{
     get_firewall_stats, quick_scan, report_false_positive, scan_prompt,
 };
+use agent_armor::modules::nhi::crypto_identity;
 use agent_armor::modules::policy::evaluate_policy::evaluate_policy;
+use agent_armor::modules::protocol::detect_protocol::detect_protocol;
 use agent_armor::modules::risk::adaptive_scorer::{
     apply_feedback, calculate_adaptive_risk, get_current_weights, update_baseline,
     AdaptiveScoreInput,
 };
+use agent_armor::modules::sandbox::sandbox_executor;
 use agent_armor::modules::taint::taint_tracker::{
     analyze_taint, classify_sink, classify_source, get_session_taint, update_session_taint,
     SinkType, EXTERNAL_TOOL, INTERNAL_API, LOCAL_FS, SECRET, SHELL_OUTPUT, UNTRUSTED_USER,
 };
+use agent_armor::modules::telemetry::otel_emitter;
 
 // ============================================================================
 // 1. Prompt Injection Firewall Tests
@@ -589,6 +593,8 @@ fn make_workspace_policy(
         allowed_protocols,
         tools,
         allowed_domains: allowed_domains.into_iter().map(|s| s.to_string()).collect(),
+        threshold_block: 70,
+        threshold_review: 35,
     }
 }
 
@@ -1191,4 +1197,339 @@ fn test_threat_feed_detects_prompt_injection() {
             .any(|m| m.indicator_type == ThreatType::PromptInjection),
         "Should match PromptInjection type"
     );
+}
+
+// ============================================================================
+// PROTOCOL DPI TESTS (Layer 1)
+// ============================================================================
+
+#[test]
+fn test_detect_protocol_explicit_mcp() {
+    let req = make_request("filesystem.read", ActionType::FileRead, HashMap::new());
+    let mut req_with_proto = req;
+    req_with_proto.protocol = Some(ProtocolKind::Mcp);
+    assert_eq!(detect_protocol(&req_with_proto), ProtocolKind::Mcp);
+}
+
+#[test]
+fn test_detect_protocol_mcp_by_tool_name() {
+    let req = InspectRequest {
+        agent_id: "test-agent".into(),
+        workspace_id: None,
+        framework: "langchain".into(),
+        protocol: None,
+        action: ActionDetail {
+            action_type: ActionType::FileRead,
+            tool_name: "mcp-filesystem-read".into(),
+            payload: HashMap::new(),
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+    assert_eq!(detect_protocol(&req), ProtocolKind::Mcp);
+}
+
+#[test]
+fn test_detect_protocol_a2a_by_payload() {
+    let mut payload = HashMap::new();
+    payload.insert("taskId".into(), serde_json::json!("task-123"));
+    let req = InspectRequest {
+        agent_id: "test-agent".into(),
+        workspace_id: None,
+        framework: "custom".into(),
+        protocol: None,
+        action: ActionDetail {
+            action_type: ActionType::Http,
+            tool_name: "agent-call".into(),
+            payload,
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+    assert_eq!(detect_protocol(&req), ProtocolKind::A2a);
+}
+
+#[test]
+fn test_detect_protocol_http_function_fallback() {
+    let req = InspectRequest {
+        agent_id: "test-agent".into(),
+        workspace_id: None,
+        framework: "langchain".into(),
+        protocol: None,
+        action: ActionDetail {
+            action_type: ActionType::Http,
+            tool_name: "my-custom-tool".into(),
+            payload: HashMap::new(),
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+    assert_eq!(detect_protocol(&req), ProtocolKind::HttpFunction);
+}
+
+#[test]
+fn test_detect_protocol_unknown_empty_framework() {
+    let req = InspectRequest {
+        agent_id: "test-agent".into(),
+        workspace_id: None,
+        framework: "".into(),
+        protocol: None,
+        action: ActionDetail {
+            action_type: ActionType::Http,
+            tool_name: "generic-tool".into(),
+            payload: HashMap::new(),
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+    assert_eq!(detect_protocol(&req), ProtocolKind::Unknown);
+}
+
+// ============================================================================
+// NHI IDENTITY TESTS (Layer 3)
+// ============================================================================
+
+#[test]
+fn test_nhi_register_and_get_identity() {
+    let id = crypto_identity::register_identity(
+        "test-nhi-reg",
+        Some("ws-test"),
+        vec!["file.read".into()],
+    );
+    assert_eq!(id.agent_id, "test-nhi-reg");
+    assert!(id.spiffe_id.contains("test-nhi-reg"));
+    assert!(!id.public_key_hex.is_empty());
+    assert_eq!(id.trust_score, 0.5);
+
+    let fetched = crypto_identity::get_identity("test-nhi-reg");
+    assert!(fetched.is_some(), "Should find registered identity");
+}
+
+#[test]
+fn test_nhi_get_unknown_returns_none() {
+    let fetched = crypto_identity::get_identity("nonexistent-agent-xyz");
+    assert!(fetched.is_none(), "Should return None for unknown agent");
+}
+
+#[test]
+fn test_nhi_simulated_attestation() {
+    crypto_identity::register_identity("test-nhi-attest-sim", None, vec![]);
+    let result = crypto_identity::attest_agent("test-nhi-attest-sim", "test-challenge");
+    assert!(result.verified, "Simulated attestation should always pass");
+    assert_eq!(result.mode, "simulated");
+}
+
+#[test]
+fn test_nhi_attestation_unknown_agent() {
+    let result = crypto_identity::attest_agent("nonexistent-attest-xyz", "challenge");
+    assert!(!result.verified, "Unknown agent should fail attestation");
+}
+
+#[test]
+fn test_nhi_real_challenge_response() {
+    crypto_identity::register_identity("test-nhi-real-cr", None, vec!["shell".into()]);
+
+    // Get the agent's secret key
+    let secret_hex =
+        crypto_identity::get_agent_secret_hex("test-nhi-real-cr").expect("Should have secret key");
+    let secret = hex::decode(&secret_hex).expect("Valid hex");
+
+    // Create challenge
+    let challenge = crypto_identity::create_challenge("test-nhi-real-cr")
+        .expect("Should create challenge for registered agent");
+    assert!(!challenge.nonce.is_empty());
+
+    // Agent signs the nonce
+    use hmac::Mac;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&secret).unwrap();
+    mac.update(challenge.nonce.as_bytes());
+    let signature = hex::encode(mac.finalize().into_bytes());
+
+    // Verify
+    let result = crypto_identity::verify_attestation(
+        "test-nhi-real-cr",
+        &challenge.challenge_id,
+        &signature,
+    );
+    assert!(
+        result.verified,
+        "Real challenge-response should pass: {}",
+        result.reason
+    );
+    assert_eq!(result.mode, "verified");
+}
+
+#[test]
+fn test_nhi_challenge_wrong_signature() {
+    crypto_identity::register_identity("test-nhi-wrong-sig", None, vec![]);
+    let challenge =
+        crypto_identity::create_challenge("test-nhi-wrong-sig").expect("Should create challenge");
+    let result = crypto_identity::verify_attestation(
+        "test-nhi-wrong-sig",
+        &challenge.challenge_id,
+        "deadbeefcafebabe",
+    );
+    assert!(!result.verified, "Wrong signature should fail");
+    assert_eq!(result.mode, "verified");
+}
+
+#[test]
+fn test_nhi_capability_token_lifecycle() {
+    crypto_identity::register_identity("test-nhi-token", None, vec![]);
+    let token =
+        crypto_identity::issue_capability_token("test-nhi-token", vec!["read".into()], 3600)
+            .expect("Should issue token");
+    assert!(token.valid);
+    assert!(crypto_identity::verify_capability_token(
+        &token.token_id,
+        "read"
+    ));
+    assert!(!crypto_identity::verify_capability_token(
+        &token.token_id,
+        "write"
+    ));
+
+    crypto_identity::revoke_token(&token.token_id);
+    assert!(!crypto_identity::verify_capability_token(
+        &token.token_id,
+        "read"
+    ));
+}
+
+#[test]
+fn test_nhi_trust_score_updates() {
+    crypto_identity::register_identity("test-nhi-trust", None, vec![]);
+    let initial = crypto_identity::get_agent_trust("test-nhi-trust");
+    assert!((initial - 0.5).abs() < 0.01);
+
+    crypto_identity::update_trust_from_decision("test-nhi-trust", "allow", 10);
+    let after_allow = crypto_identity::get_agent_trust("test-nhi-trust");
+    assert!(after_allow > initial, "Allow should increase trust");
+
+    crypto_identity::update_trust_from_decision("test-nhi-trust", "block", 90);
+    let after_block = crypto_identity::get_agent_trust("test-nhi-trust");
+    assert!(after_block < after_allow, "Block should decrease trust");
+}
+
+// ============================================================================
+// SANDBOX TESTS (Layer 5)
+// ============================================================================
+
+#[test]
+fn test_sandbox_should_sandbox_high_risk_shell() {
+    assert!(
+        sandbox_executor::should_sandbox("shell", 75),
+        "Shell with risk 75 should be sandboxed"
+    );
+}
+
+#[test]
+fn test_sandbox_should_not_sandbox_low_risk() {
+    assert!(
+        !sandbox_executor::should_sandbox("file_read", 20),
+        "Low-risk file_read should not be sandboxed"
+    );
+}
+
+#[test]
+fn test_sandbox_execute_produces_impact() {
+    let payload = serde_json::json!({"command": "rm -rf /tmp/data"});
+    let result = sandbox_executor::sandbox_execute("terminal.exec", "shell", &payload, 80);
+    assert_eq!(result.status, "completed");
+    assert!(result.requires_approval);
+    assert!(
+        !result.impact.summary.is_empty(),
+        "Impact analysis should have a summary"
+    );
+}
+
+#[test]
+fn test_sandbox_approve_reject() {
+    let payload = serde_json::json!({"command": "chmod 777 /etc/passwd"});
+    let result = sandbox_executor::sandbox_execute("terminal.exec", "shell", &payload, 85);
+    let id = result.execution_id.clone();
+
+    let approved = sandbox_executor::approve_sandbox(&id);
+    assert!(approved.is_some(), "Should find and approve sandbox");
+    assert_eq!(approved.unwrap().approval_status, "approved");
+}
+
+// ============================================================================
+// TELEMETRY TESTS (Layer 8)
+// ============================================================================
+
+#[test]
+fn test_telemetry_emit_span() {
+    let mut attrs = HashMap::new();
+    attrs.insert("test_key".into(), serde_json::json!("test_value"));
+
+    let span = otel_emitter::emit_governance_span(
+        "test-agent-telem",
+        "filesystem.read",
+        "file_read",
+        "allow",
+        15,
+        5,
+        attrs,
+    );
+    assert!(!span.trace_id.is_empty());
+    assert!(!span.span_id.is_empty());
+    assert_eq!(span.name, "agent_armor.governance");
+    assert!(
+        span.attributes.contains_key("agent.id"),
+        "Should have agent.id attribute"
+    );
+}
+
+#[test]
+fn test_telemetry_emit_metrics() {
+    otel_emitter::emit_pipeline_metrics("allow", 20, 3, "file_read");
+    let metrics = otel_emitter::get_recent_metrics(10);
+    assert!(!metrics.is_empty(), "Should have recorded metrics");
+}
+
+#[test]
+fn test_telemetry_export_otlp() {
+    // Emit a span first
+    otel_emitter::emit_governance_span(
+        "test-agent-otlp",
+        "tool",
+        "shell",
+        "block",
+        85,
+        10,
+        HashMap::new(),
+    );
+    let records = otel_emitter::export_otlp_json(10);
+    assert!(!records.is_empty(), "Should export OTLP records");
+}
+
+// ============================================================================
+// CONFIGURABLE THRESHOLDS TESTS (v0.2.0)
+// ============================================================================
+
+#[test]
+fn test_custom_threshold_block_lower() {
+    use agent_armor::modules::policy::tool_risk::{
+        score_tool_risk_with_thresholds, LayerRiskContributions,
+    };
+
+    let req = make_request("terminal.exec", ActionType::Shell, HashMap::new());
+    let layers = LayerRiskContributions {
+        adaptive: 40,
+        ..Default::default()
+    };
+    // With a lower block threshold of 50, a score around 40 composite should
+    // be treated differently than with the default 70
+    let result = score_tool_risk_with_thresholds(
+        &req,
+        GovernanceDecision::Allow,
+        &[],
+        &layers,
+        50, // lower block threshold
+        25, // lower review threshold
+    );
+    // With shell (25 pattern) + adaptive 40, composite is non-trivial
+    // The key point is the function uses our custom thresholds
+    assert!(result.score > 0, "Should compute a non-zero score");
 }

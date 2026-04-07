@@ -99,6 +99,16 @@ impl SqliteStorage {
         .execute(&self.pool)
         .await?;
 
+        // v0.2.0 migration: add threshold columns to workspace_policies
+        for col in &[("threshold_block", "70"), ("threshold_review", "35")] {
+            let alter = format!(
+                "ALTER TABLE workspace_policies ADD COLUMN {} INTEGER NOT NULL DEFAULT {}",
+                col.0, col.1
+            );
+            // Ignore errors — column may already exist
+            let _ = sqlx::query(&alter).execute(&self.pool).await;
+        }
+
         // Create indexes
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_events(agent_id)")
             .execute(&self.pool)
@@ -173,6 +183,177 @@ impl AuditStore for SqliteStorage {
         .await?;
 
         Ok(rows.into_iter().map(|r| r.into_stored()).collect())
+    }
+
+    async fn list_filtered(
+        &self,
+        filter: &AuditExportFilter,
+    ) -> Result<Vec<StoredAuditEvent>, ArmorError> {
+        let limit = filter.limit.unwrap_or(1000) as i64;
+        let agent = filter.agent_id.clone().unwrap_or_default();
+        let decision = filter.decision.clone().unwrap_or_default();
+        let from = filter.from_date.clone().unwrap_or_default();
+        let to = filter.to_date.clone().unwrap_or_default();
+
+        let rows = sqlx::query_as::<_, AuditRow>(
+            "SELECT event_id, agent_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons, timestamp
+             FROM audit_events
+             WHERE (? = '' OR agent_id = ?)
+               AND (? = '' OR decision = ?)
+               AND (? = '' OR timestamp >= ?)
+               AND (? = '' OR timestamp <= ?)
+             ORDER BY created_at DESC LIMIT ?"
+        )
+        .bind(&agent).bind(&agent)
+        .bind(&decision).bind(&decision)
+        .bind(&from).bind(&from)
+        .bind(&to).bind(&to)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(|r| r.into_stored()).collect())
+    }
+
+    async fn stats(&self) -> Result<AuditStats, ArmorError> {
+        use sqlx::Row;
+
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_events")
+            .fetch_one(&self.pool)
+            .await?;
+
+        let avg: f64 =
+            sqlx::query_scalar("SELECT COALESCE(AVG(risk_score), 0.0) FROM audit_events")
+                .fetch_one(&self.pool)
+                .await?;
+
+        let decision_rows = sqlx::query(
+            "SELECT decision, COUNT(*) as cnt FROM audit_events GROUP BY decision ORDER BY cnt DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut decisions = std::collections::HashMap::new();
+        for row in &decision_rows {
+            let d: String = row.try_get("decision")?;
+            let c: i64 = row.try_get("cnt")?;
+            decisions.insert(d, c as u64);
+        }
+
+        let agent_rows = sqlx::query(
+            "SELECT agent_id, COUNT(*) as cnt FROM audit_events GROUP BY agent_id ORDER BY cnt DESC LIMIT 10",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let top_agents: Vec<(String, u64)> = agent_rows
+            .iter()
+            .map(|r| {
+                let a: String = r.try_get("agent_id").unwrap_or_default();
+                let c: i64 = r.try_get("cnt").unwrap_or(0);
+                (a, c as u64)
+            })
+            .collect();
+
+        let tool_rows = sqlx::query(
+            "SELECT tool_name, COUNT(*) as cnt FROM audit_events GROUP BY tool_name ORDER BY cnt DESC LIMIT 10",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let top_tools: Vec<(String, u64)> = tool_rows
+            .iter()
+            .map(|r| {
+                let t: String = r.try_get("tool_name").unwrap_or_default();
+                let c: i64 = r.try_get("cnt").unwrap_or(0);
+                (t, c as u64)
+            })
+            .collect();
+
+        Ok(AuditStats {
+            total_events: total as u64,
+            decisions,
+            top_agents,
+            top_tools,
+            avg_risk_score: avg,
+        })
+    }
+
+    async fn agent_analytics(
+        &self,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<AgentAnalytics>, ArmorError> {
+        use sqlx::Row;
+
+        let agent_filter = agent_id.unwrap_or("");
+
+        let rows = sqlx::query(
+            "SELECT agent_id,
+                    COUNT(*) as total,
+                    AVG(risk_score) as avg_risk,
+                    MAX(timestamp) as last_ts,
+                    GROUP_CONCAT(DISTINCT decision) as decisions_csv,
+                    GROUP_CONCAT(tool_name) as tools_csv
+             FROM audit_events
+             WHERE ? = '' OR agent_id = ?
+             GROUP BY agent_id
+             ORDER BY total DESC",
+        )
+        .bind(agent_filter)
+        .bind(agent_filter)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut results = Vec::new();
+        for row in &rows {
+            let aid: String = row.try_get("agent_id").unwrap_or_default();
+            let total: i64 = row.try_get("total").unwrap_or(0);
+            let avg_risk: f64 = row.try_get("avg_risk").unwrap_or(0.0);
+            let last_ts: String = row.try_get("last_ts").unwrap_or_default();
+            let tools_csv: String = row.try_get("tools_csv").unwrap_or_default();
+
+            // Count decisions per type
+            let decision_rows = sqlx::query(
+                "SELECT decision, COUNT(*) as cnt FROM audit_events WHERE agent_id = ? GROUP BY decision",
+            )
+            .bind(&aid)
+            .fetch_all(&self.pool)
+            .await?;
+
+            let mut decisions = std::collections::HashMap::new();
+            for dr in &decision_rows {
+                let d: String = dr.try_get("decision").unwrap_or_default();
+                let c: i64 = dr.try_get("cnt").unwrap_or(0);
+                decisions.insert(d, c as u64);
+            }
+
+            // Count tool usage
+            let mut tool_counts: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+            for tool in tools_csv.split(',') {
+                let t = tool.trim().to_string();
+                if !t.is_empty() {
+                    *tool_counts.entry(t).or_insert(0) += 1;
+                }
+            }
+            let mut top_tools: Vec<(String, u64)> = tool_counts.into_iter().collect();
+            top_tools.sort_by(|a, b| b.1.cmp(&a.1));
+            top_tools.truncate(5);
+
+            let trust = crate::modules::nhi::crypto_identity::get_agent_trust(&aid);
+
+            results.push(AgentAnalytics {
+                agent_id: aid,
+                total_requests: total as u64,
+                decisions,
+                avg_risk_score: avg_risk,
+                top_tools,
+                last_activity: last_ts,
+                trust_score: trust,
+            });
+        }
+
+        Ok(results)
     }
 }
 
@@ -367,7 +548,7 @@ impl PolicyStore for SqliteStorage {
         workspace_id: &str,
     ) -> Result<WorkspacePolicy, ArmorError> {
         let row = sqlx::query_as::<_, WorkspaceRow>(
-            "SELECT workspace_id, allowed_protocols, allowed_domains, tools
+            "SELECT workspace_id, allowed_protocols, allowed_domains, tools, threshold_block, threshold_review
              FROM workspace_policies WHERE workspace_id = ?",
         )
         .bind(workspace_id)
@@ -391,7 +572,7 @@ impl PolicyStore for SqliteStorage {
 
     async fn list_workspaces(&self) -> Result<Vec<WorkspacePolicy>, ArmorError> {
         let rows = sqlx::query_as::<_, WorkspaceRow>(
-            "SELECT workspace_id, allowed_protocols, allowed_domains, tools
+            "SELECT workspace_id, allowed_protocols, allowed_domains, tools, threshold_block, threshold_review
              FROM workspace_policies ORDER BY workspace_id",
         )
         .fetch_all(&self.pool)
@@ -444,18 +625,22 @@ impl PolicyStore for SqliteStorage {
         let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(
-            "INSERT INTO workspace_policies (workspace_id, allowed_protocols, allowed_domains, tools, updated_at)
-             VALUES (?, ?, ?, ?, ?)
+            "INSERT INTO workspace_policies (workspace_id, allowed_protocols, allowed_domains, tools, threshold_block, threshold_review, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(workspace_id) DO UPDATE SET
                 allowed_protocols = excluded.allowed_protocols,
                 allowed_domains = excluded.allowed_domains,
                 tools = excluded.tools,
+                threshold_block = excluded.threshold_block,
+                threshold_review = excluded.threshold_review,
                 updated_at = excluded.updated_at"
         )
         .bind(&policy.workspace_id)
         .bind(&protocols)
         .bind(&domains)
         .bind(&tools)
+        .bind(policy.threshold_block as i64)
+        .bind(policy.threshold_review as i64)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -527,6 +712,8 @@ struct WorkspaceRow {
     allowed_protocols: String,
     allowed_domains: String,
     tools: String,
+    threshold_block: i64,
+    threshold_review: i64,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for WorkspaceRow {
@@ -537,6 +724,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for WorkspaceRow {
             allowed_protocols: row.try_get("allowed_protocols")?,
             allowed_domains: row.try_get("allowed_domains")?,
             tools: row.try_get("tools")?,
+            threshold_block: row.try_get("threshold_block").unwrap_or(70),
+            threshold_review: row.try_get("threshold_review").unwrap_or(35),
         })
     }
 }
@@ -548,6 +737,8 @@ impl WorkspaceRow {
             allowed_protocols: serde_json::from_str(&self.allowed_protocols).unwrap_or_default(),
             allowed_domains: serde_json::from_str(&self.allowed_domains).unwrap_or_default(),
             tools: serde_json::from_str(&self.tools).unwrap_or_default(),
+            threshold_block: self.threshold_block as u32,
+            threshold_review: self.threshold_review as u32,
         }
     }
 }

@@ -131,6 +131,20 @@ pub struct WorkspacePolicy {
     pub allowed_protocols: Vec<ProtocolKind>,
     pub tools: Vec<ToolPolicy>,
     pub allowed_domains: Vec<String>,
+    /// Risk score threshold for blocking decisions (0-100). Default: 70.
+    #[serde(default = "default_threshold_block")]
+    pub threshold_block: u32,
+    /// Risk score threshold for review decisions (0-100). Default: 35.
+    #[serde(default = "default_threshold_review")]
+    pub threshold_review: u32,
+}
+
+fn default_threshold_block() -> u32 {
+    70
+}
+
+fn default_threshold_review() -> u32 {
+    35
 }
 
 // ── Secrets ──
@@ -323,6 +337,40 @@ pub struct ArmorConfig {
     pub workspaces: Vec<WorkspacePolicy>,
     #[serde(default)]
     pub vault: Vec<String>,
+}
+
+// ── Audit Export & Analytics ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditExportFilter {
+    pub agent_id: Option<String>,
+    pub decision: Option<String>,
+    pub from_date: Option<String>,
+    pub to_date: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditStats {
+    pub total_events: u64,
+    pub decisions: HashMap<String, u64>,
+    pub top_agents: Vec<(String, u64)>,
+    pub top_tools: Vec<(String, u64)>,
+    pub avg_risk_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAnalytics {
+    pub agent_id: String,
+    pub total_requests: u64,
+    pub decisions: HashMap<String, u64>,
+    pub avg_risk_score: f64,
+    pub top_tools: Vec<(String, u64)>,
+    pub last_activity: String,
+    pub trust_score: f64,
 }
 
 // ── Demo scenario ──

@@ -218,7 +218,9 @@ async fn cmd_serve(db_url: &str, port_override: Option<u16>, seed_demo: bool) {
     auto_import_config(&storage).await;
 
     let event_bus = EventBus::new(1024);
-    let webhook_manager = Arc::new(WebhookManager::new());
+    let webhook_manager = Arc::new(WebhookManager::new(Arc::new(
+        webhooks::DeadLetterQueue::new(),
+    )));
     let behavioral_engine = Arc::new(BehavioralEngine::new());
 
     // Spawn webhook delivery worker
@@ -235,8 +237,15 @@ async fn cmd_serve(db_url: &str, port_override: Option<u16>, seed_demo: bool) {
                 agent_armor::modules::taint::taint_tracker::prune_stale_sessions(ttl);
             let session_pruned =
                 agent_armor::modules::session_graph::session_dag::prune_stale_sessions(ttl_ms);
-            if taint_pruned > 0 || session_pruned > 0 {
-                tracing::debug!(taint_pruned, session_pruned, "TTL cleanup completed");
+            let challenge_pruned =
+                agent_armor::modules::nhi::crypto_identity::prune_expired_challenges();
+            if taint_pruned > 0 || session_pruned > 0 || challenge_pruned > 0 {
+                tracing::debug!(
+                    taint_pruned,
+                    session_pruned,
+                    challenge_pruned,
+                    "TTL cleanup completed"
+                );
             }
         }
     });
@@ -355,7 +364,9 @@ async fn cmd_inspect(source: &str, db_url: &str) -> i32 {
         policy_store: storage.clone(),
         api_key_store: storage.clone(),
         event_bus: EventBus::new(16),
-        webhook_manager: Arc::new(WebhookManager::new()),
+        webhook_manager: Arc::new(WebhookManager::new(Arc::new(
+            webhooks::DeadLetterQueue::new(),
+        ))),
         behavioral_engine: Arc::new(BehavioralEngine::new()),
         rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
         threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
@@ -450,7 +461,7 @@ async fn cmd_inspect(source: &str, db_url: &str) -> i32 {
                     "secretPlan": result.secret_plan,
                     "protocol": result.protocol,
                 }))
-                .unwrap()
+                .unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {e}\"}}"))
             );
 
             match result.decision {
@@ -650,7 +661,11 @@ async fn cmd_audit(db_url: &str, limit: u32, format: &str) {
 
     match format {
         "json" => {
-            println!("{}", serde_json::to_string_pretty(&events).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&events)
+                    .unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {e}\"}}"))
+            );
         }
         "table" => {
             let green = "\x1b[38;2;0;255;136m";
@@ -737,7 +752,9 @@ async fn cmd_proxy(db_url: &str, agent_id: &str, command: &str, args: Vec<String
     seed_demo_data(&storage).await;
 
     let event_bus = EventBus::new(256);
-    let webhook_manager = Arc::new(WebhookManager::new());
+    let webhook_manager = Arc::new(WebhookManager::new(Arc::new(
+        webhooks::DeadLetterQueue::new(),
+    )));
 
     let state = Arc::new(AppState {
         audit_store: storage.clone(),
