@@ -50,7 +50,9 @@ async fn main() {
     }
 
     let event_bus = EventBus::new(1024);
-    let webhook_manager = Arc::new(WebhookManager::new());
+    let webhook_manager = Arc::new(WebhookManager::new(Arc::new(
+        webhooks::DeadLetterQueue::new(),
+    )));
     webhooks::spawn_webhook_worker(event_bus.clone(), webhook_manager.clone());
 
     let state = Arc::new(AppState {

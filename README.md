@@ -489,10 +489,48 @@ Exit codes: `0` = allow, `1` = review, `2` = block, `3` = error.
 
 ## Testing
 
+Agent Armor has a 3-tier verification strategy: unit tests, property-based tests, and fuzzing.
+
 ```bash
-cargo test                    # Run all tests
-cargo test -- --nocapture     # With output
-cargo clippy                  # Lint
+# Run all tests (unit + integration + property-based)
+cargo test --all-features
+
+# Run only property-based tests (proptest)
+cargo test --test property_tests
+
+# Lint
+cargo clippy -- -D warnings
+
+# Security audit
+cargo audit
+```
+
+### Property-Based Testing
+
+19 property tests using [proptest](https://github.com/proptest-rs/proptest) verify invariants across all 4 critical security layers:
+
+| Layer | Properties Verified |
+|-------|-------------------|
+| **Injection Firewall** | Score range [0,100], blocked iff score >= 75, determinism, stage count, quick_scan consistency |
+| **Taint Tracking** | Monotonic accumulation, no-panic on arbitrary input, determinism, secret path detection |
+| **Adaptive Risk Scorer** | Score range [0,100], decision/threshold coherence, 5-signal presence, exfiltration forces block |
+| **Session DAG** | Anomaly score range, no-panic on arbitrary input, first-call allowed, unique node IDs |
+
+### Fuzzing
+
+3 fuzzing targets using [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) for crash discovery and invariant checking:
+
+```bash
+# Install cargo-fuzz (requires nightly)
+cargo install cargo-fuzz
+
+# List targets
+cd community && cargo fuzz list
+
+# Run firewall fuzzer (1000 iterations)
+cargo +nightly fuzz run fuzz_firewall -- -runs=1000
+
+# Available targets: fuzz_firewall, fuzz_taint, fuzz_session_dag
 ```
 
 ## Contributing
