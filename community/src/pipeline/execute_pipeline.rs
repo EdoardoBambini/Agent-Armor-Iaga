@@ -14,8 +14,9 @@ use crate::modules::policy::evaluate_policy::evaluate_policy;
 use crate::modules::policy::formal_verify;
 use crate::modules::policy::tool_risk::{score_tool_risk_with_thresholds, LayerRiskContributions};
 use crate::modules::protocol::detect_protocol::detect_protocol;
-use crate::modules::protocol::mcp_parser::normalize_mcp_payload;
-use crate::modules::protocol::validate_mcp_tool::validate_mcp_tool;
+use crate::modules::protocol::protocol_envelope::{
+    normalize_protocol_payload, validate_protocol_payload,
+};
 use crate::modules::risk::adaptive_scorer::{self, AdaptiveScoreInput};
 use crate::modules::sandbox::sandbox_executor;
 use crate::modules::secrets::secret_references::plan_secret_injection;
@@ -36,11 +37,29 @@ fn action_type_str(at: ActionType) -> &'static str {
     }
 }
 
+fn protocol_name(protocol: ProtocolKind) -> &'static str {
+    match protocol {
+        ProtocolKind::Mcp => "mcp",
+        ProtocolKind::Acp => "acp",
+        ProtocolKind::A2a => "a2a",
+        ProtocolKind::HttpFunction => "http-function",
+        ProtocolKind::Unknown => "unknown",
+    }
+}
+
 pub async fn execute_pipeline(
     input: &InspectRequest,
     state: &Arc<AppState>,
 ) -> Result<GovernanceResult, ArmorError> {
     let pipeline_start = std::time::Instant::now();
+    let trace_id = Uuid::new_v4().to_string();
+
+    tracing::debug!(
+        trace_id = %trace_id,
+        agent_id = %input.agent_id,
+        tool_name = %input.action.tool_name,
+        "governance pipeline started"
+    );
 
     let profile = state
         .policy_store
@@ -54,6 +73,11 @@ pub async fn execute_pipeline(
         .policy_store
         .get_workspace_policy(workspace_id)
         .await?;
+    let tenant_id = input
+        .tenant_id
+        .clone()
+        .or(profile.tenant_id.clone())
+        .or(workspace_policy.tenant_id.clone());
 
     // ═══════════════════════════════════════════════════════════════
     // RATE LIMIT CHECK — runs before all security layers
@@ -92,6 +116,7 @@ pub async fn execute_pipeline(
         let stored = StoredAuditEvent {
             event_id: audit_event.event_id.clone(),
             agent_id: audit_event.agent_id.clone(),
+            tenant_id: tenant_id.clone(),
             framework: audit_event.framework.clone(),
             action_type: audit_event.action_type,
             tool_name: audit_event.tool_name.clone(),
@@ -106,6 +131,7 @@ pub async fn execute_pipeline(
         }
 
         return Ok(GovernanceResult {
+            trace_id,
             protocol: detect_protocol(input),
             normalized_payload: input.action.payload.clone(),
             decision: GovernanceDecision::Block,
@@ -139,21 +165,9 @@ pub async fn execute_pipeline(
 
     let protocol = detect_protocol(input);
 
-    let normalized_payload = if protocol == ProtocolKind::Mcp {
-        normalize_mcp_payload(input)
-    } else {
-        input.action.payload.clone()
-    };
+    let normalized_payload = normalize_protocol_payload(input, protocol);
 
-    let schema_validation = if protocol == ProtocolKind::Mcp {
-        validate_mcp_tool(input)
-    } else {
-        SchemaValidation {
-            tool_name: input.action.tool_name.clone(),
-            valid: true,
-            findings: vec!["non-MCP protocol, schema validation skipped".to_string()],
-        }
-    };
+    let schema_validation = validate_protocol_payload(input, protocol);
 
     let action_type_s = action_type_str(input.action.action_type);
     let payload_json = serde_json::Value::Object(
@@ -314,7 +328,10 @@ pub async fn execute_pipeline(
             .push("one or more requested secrets were denied by vault policy".to_string());
     }
     if !schema_validation.valid {
-        policy_findings.push("MCP tool schema validation failed".to_string());
+        policy_findings.push(format!(
+            "{} protocol schema validation failed",
+            protocol_name(protocol)
+        ));
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -511,6 +528,7 @@ pub async fn execute_pipeline(
     crypto_identity::update_trust_from_decision(&input.agent_id, &decision_str, risk.score);
 
     let mut result = GovernanceResult {
+        trace_id: trace_id.clone(),
         protocol,
         normalized_payload,
         decision: risk.decision,
@@ -542,6 +560,7 @@ pub async fn execute_pipeline(
     let stored = StoredAuditEvent {
         event_id: result.audit_event.event_id.clone(),
         agent_id: result.audit_event.agent_id.clone(),
+        tenant_id,
         framework: result.audit_event.framework.clone(),
         action_type: result.audit_event.action_type,
         tool_name: result.audit_event.tool_name.clone(),
@@ -576,6 +595,16 @@ pub async fn execute_pipeline(
         result.review_request_id = Some(review.id);
         result.review_status = ReviewStatus::Pending;
     }
+
+    tracing::info!(
+        trace_id = %trace_id,
+        agent_id = %result.audit_event.agent_id,
+        tool_name = %result.audit_event.tool_name,
+        decision = ?result.decision,
+        risk_score = result.risk.score,
+        duration_ms,
+        "governance pipeline completed"
+    );
 
     Ok(result)
 }

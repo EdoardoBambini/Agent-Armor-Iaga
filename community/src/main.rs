@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
-use agent_armor::config::env::load_env;
+use agent_armor::config::env::{load_env, load_logging_env, LogFormat, LoggingEnv};
 use agent_armor::core::types::RateLimitConfig;
 use agent_armor::events::bus::EventBus;
 use agent_armor::events::webhooks::{self, WebhookManager};
@@ -13,8 +13,83 @@ use agent_armor::modules::rate_limit::limiter::RateLimiter;
 use agent_armor::modules::threat_intel::feed::ThreatFeed;
 use agent_armor::server::app_state::AppState;
 use agent_armor::server::create_server::create_router;
+#[cfg(feature = "postgres")]
+use agent_armor::storage::postgres::PostgresStorage;
+#[cfg(feature = "sqlite")]
 use agent_armor::storage::sqlite::SqliteStorage;
-use agent_armor::storage::traits::PolicyStore;
+use agent_armor::storage::traits::{
+    ApiKeyStore, AuditStore, PolicyStore, ReviewStore, StorageBackend, TenantStore,
+};
+
+struct StorageBundle {
+    audit_store: Arc<dyn AuditStore>,
+    review_store: Arc<dyn ReviewStore>,
+    policy_store: Arc<dyn PolicyStore>,
+    api_key_store: Arc<dyn ApiKeyStore>,
+    tenant_store: Arc<dyn TenantStore>,
+    storage_backend: StorageBackend,
+}
+
+fn detect_storage_backend(db_url: &str) -> StorageBackend {
+    if db_url.starts_with("postgres://") || db_url.starts_with("postgresql://") {
+        StorageBackend::Postgres
+    } else {
+        StorageBackend::Sqlite
+    }
+}
+
+async fn init_storage_bundle(db_url: &str) -> Result<StorageBundle, String> {
+    match detect_storage_backend(db_url) {
+        StorageBackend::Sqlite => {
+            #[cfg(feature = "sqlite")]
+            {
+                let storage = Arc::new(
+                    SqliteStorage::new(db_url)
+                        .await
+                        .map_err(|e| format!("Failed to initialize SQLite database: {e}"))?,
+                );
+
+                return Ok(StorageBundle {
+                    audit_store: storage.clone(),
+                    review_store: storage.clone(),
+                    policy_store: storage.clone(),
+                    api_key_store: storage.clone(),
+                    tenant_store: storage,
+                    storage_backend: StorageBackend::Sqlite,
+                });
+            }
+
+            #[cfg(not(feature = "sqlite"))]
+            {
+                Err("SQLite support is not compiled in this build".to_string())
+            }
+        }
+        StorageBackend::Postgres => {
+            #[cfg(feature = "postgres")]
+            {
+                let storage = Arc::new(
+                    PostgresStorage::new(db_url)
+                        .await
+                        .map_err(|e| format!("Failed to initialize PostgreSQL database: {e}"))?,
+                );
+
+                return Ok(StorageBundle {
+                    audit_store: storage.clone(),
+                    review_store: storage.clone(),
+                    policy_store: storage.clone(),
+                    api_key_store: storage.clone(),
+                    tenant_store: storage,
+                    storage_backend: StorageBackend::Postgres,
+                });
+            }
+
+            #[cfg(not(feature = "postgres"))]
+            {
+                Err("PostgreSQL support requires building with `--features postgres`".to_string())
+            }
+        }
+    }
+}
 
 /// IAGA Agent Armor — Zero-trust governance for autonomous AI agents
 #[derive(Parser)]
@@ -102,16 +177,26 @@ enum Commands {
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
+
+    /// Run as MCP server: expose Agent Armor governance tools over stdio
+    McpServer {
+        /// Seed demo data on startup so inspect calls work out of the box
+        #[arg(long, default_value_t = true)]
+        seed_demo: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    let runtime_env = load_env();
+    let logging_env = load_logging_env(runtime_env.node_env);
+    init_tracing(&logging_env);
+
+    tracing::debug!(
+        format = %logging_env.format,
+        filter = %logging_env.filter_directive,
+        "tracing initialized"
+    );
 
     let cli = Cli::parse();
     let db_url = cli
@@ -159,6 +244,40 @@ async fn main() {
         }) => {
             cmd_proxy(&db_url, &agent_id, &command, args).await;
         }
+        Some(Commands::McpServer { seed_demo }) => {
+            cmd_mcp_server(&db_url, seed_demo).await;
+        }
+    }
+}
+
+fn init_tracing(logging_env: &LoggingEnv) {
+    let env_filter = tracing_subscriber::EnvFilter::try_new(&logging_env.filter_directive)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    match logging_env.format {
+        LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(env_filter)
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+                .init();
+        }
+        LogFormat::Compact => {
+            tracing_subscriber::fmt()
+                .compact()
+                .with_env_filter(env_filter)
+                .with_target(true)
+                .init();
+        }
+        LogFormat::Pretty => {
+            tracing_subscriber::fmt()
+                .pretty()
+                .with_env_filter(env_filter)
+                .with_target(true)
+                .init();
+        }
     }
 }
 
@@ -201,21 +320,20 @@ async fn cmd_serve(db_url: &str, port_override: Option<u16>, seed_demo: bool) {
 
     print_banner(app_env.port);
 
-    let storage = match SqliteStorage::new(db_url).await {
+    let storage = match init_storage_bundle(db_url).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to initialize SQLite database: {e}");
+            eprintln!("{e}");
             process::exit(1);
         }
     };
-    let storage = Arc::new(storage);
 
     if seed_demo {
-        seed_demo_data(&storage).await;
+        seed_demo_data(&storage.policy_store).await;
     }
 
     // Auto-import agent-armor.yaml if it exists and DB is fresh
-    auto_import_config(&storage).await;
+    auto_import_config(&storage.policy_store).await;
 
     let event_bus = EventBus::new(1024);
     let webhook_manager = Arc::new(WebhookManager::new(Arc::new(
@@ -258,15 +376,17 @@ async fn cmd_serve(db_url: &str, port_override: Option<u16>, seed_demo: bool) {
     );
 
     let state = Arc::new(AppState {
-        audit_store: storage.clone(),
-        review_store: storage.clone(),
-        policy_store: storage.clone(),
-        api_key_store: storage.clone(),
+        audit_store: storage.audit_store,
+        review_store: storage.review_store,
+        policy_store: storage.policy_store,
+        api_key_store: storage.api_key_store,
+        tenant_store: storage.tenant_store,
         event_bus,
         webhook_manager,
         behavioral_engine,
         rate_limiter,
         threat_feed,
+        storage_backend: storage.storage_backend,
         env: app_env,
     });
 
@@ -281,7 +401,7 @@ async fn cmd_serve(db_url: &str, port_override: Option<u16>, seed_demo: bool) {
         }
     };
 
-    tracing::info!(port = state.env.port, db = %db_url, "Agent Armor listening");
+    tracing::info!(port = state.env.port, db = %db_url, backend = ?state.storage_backend, "Agent Armor listening");
 
     if let Err(e) = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
@@ -350,19 +470,20 @@ async fn cmd_inspect(source: &str, db_url: &str) -> i32 {
         }
     };
 
-    let storage = match SqliteStorage::new(db_url).await {
-        Ok(s) => Arc::new(s),
+    let storage = match init_storage_bundle(db_url).await {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to open database: {e}");
+            eprintln!("{e}");
             return 3;
         }
     };
 
     let state = Arc::new(AppState {
-        audit_store: storage.clone(),
-        review_store: storage.clone(),
-        policy_store: storage.clone(),
-        api_key_store: storage.clone(),
+        audit_store: storage.audit_store,
+        review_store: storage.review_store,
+        policy_store: storage.policy_store,
+        api_key_store: storage.api_key_store,
+        tenant_store: storage.tenant_store,
         event_bus: EventBus::new(16),
         webhook_manager: Arc::new(WebhookManager::new(Arc::new(
             webhooks::DeadLetterQueue::new(),
@@ -370,6 +491,7 @@ async fn cmd_inspect(source: &str, db_url: &str) -> i32 {
         behavioral_engine: Arc::new(BehavioralEngine::new()),
         rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
         threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
+        storage_backend: storage.storage_backend,
         env: load_env(),
     });
 
@@ -452,6 +574,7 @@ async fn cmd_inspect(source: &str, db_url: &str) -> i32 {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
+                    "traceId": result.trace_id,
                     "decision": result.decision,
                     "reviewStatus": result.review_status,
                     "riskScore": result.risk.score,
@@ -515,8 +638,11 @@ fn cmd_validate(config_path: &str) {
 // ── migrate ──
 
 async fn cmd_migrate(db_url: &str) {
-    match SqliteStorage::new(db_url).await {
-        Ok(_) => println!("Migrations completed successfully."),
+    match init_storage_bundle(db_url).await {
+        Ok(storage) => println!(
+            "Migrations completed successfully for {:?}.",
+            storage.storage_backend
+        ),
         Err(e) => {
             eprintln!("Migration failed: {e}");
             process::exit(1);
@@ -549,21 +675,21 @@ async fn cmd_import(config_path: &str, db_url: &str) {
         })
     };
 
-    let storage = SqliteStorage::new(db_url).await.unwrap_or_else(|e| {
-        eprintln!("Failed to open database: {e}");
+    let storage = init_storage_bundle(db_url).await.unwrap_or_else(|e| {
+        eprintln!("{e}");
         process::exit(1);
     });
 
     let mut imported = 0;
     for profile in &config.profiles {
-        if let Err(e) = storage.upsert_profile(profile).await {
+        if let Err(e) = storage.policy_store.upsert_profile(profile).await {
             eprintln!("Failed to import profile {}: {e}", profile.agent_id);
         } else {
             imported += 1;
         }
     }
     for workspace in &config.workspaces {
-        if let Err(e) = storage.upsert_workspace(workspace).await {
+        if let Err(e) = storage.policy_store.upsert_workspace(workspace).await {
             eprintln!("Failed to import workspace {}: {e}", workspace.workspace_id);
         } else {
             imported += 1;
@@ -583,13 +709,21 @@ async fn cmd_import(config_path: &str, db_url: &str) {
 async fn cmd_export(db_url: &str, output: Option<&str>) {
     use agent_armor::core::types::ArmorConfig;
 
-    let storage = SqliteStorage::new(db_url).await.unwrap_or_else(|e| {
-        eprintln!("Failed to open database: {e}");
+    let storage = init_storage_bundle(db_url).await.unwrap_or_else(|e| {
+        eprintln!("{e}");
         process::exit(1);
     });
 
-    let profiles = storage.list_profiles().await.unwrap_or_default();
-    let workspaces = storage.list_workspaces().await.unwrap_or_default();
+    let profiles = storage
+        .policy_store
+        .list_profiles()
+        .await
+        .unwrap_or_default();
+    let workspaces = storage
+        .policy_store
+        .list_workspaces()
+        .await
+        .unwrap_or_default();
 
     let config = ArmorConfig {
         profiles,
@@ -619,16 +753,16 @@ async fn cmd_export(db_url: &str, output: Option<&str>) {
 async fn cmd_gen_key(db_url: &str, label: &str) {
     use agent_armor::auth::api_keys::generate_api_key;
 
-    let storage = SqliteStorage::new(db_url).await.unwrap_or_else(|e| {
-        eprintln!("Failed to open database: {e}");
+    let storage = init_storage_bundle(db_url).await.unwrap_or_else(|e| {
+        eprintln!("{e}");
         process::exit(1);
     });
 
     let (raw_key, key_hash) = generate_api_key();
     let key_id = uuid::Uuid::new_v4().to_string();
 
-    use agent_armor::storage::traits::ApiKeyStore;
     storage
+        .api_key_store
         .store_key(&key_id, &key_hash, label, &raw_key)
         .await
         .unwrap_or_else(|e| {
@@ -647,14 +781,12 @@ async fn cmd_gen_key(db_url: &str, label: &str) {
 // ── audit ──
 
 async fn cmd_audit(db_url: &str, limit: u32, format: &str) {
-    use agent_armor::storage::traits::AuditStore;
-
-    let storage = SqliteStorage::new(db_url).await.unwrap_or_else(|e| {
-        eprintln!("Failed to open database: {e}");
+    let storage = init_storage_bundle(db_url).await.unwrap_or_else(|e| {
+        eprintln!("{e}");
         process::exit(1);
     });
 
-    let events = storage.list(limit).await.unwrap_or_else(|e| {
+    let events = storage.audit_store.list(limit).await.unwrap_or_else(|e| {
         eprintln!("Failed to fetch audit events: {e}");
         process::exit(1);
     });
@@ -719,22 +851,22 @@ async fn cmd_audit(db_url: &str, limit: u32, format: &str) {
 
 // ── helpers ──
 
-async fn seed_demo_data(storage: &Arc<SqliteStorage>) {
+async fn seed_demo_data(policy_store: &Arc<dyn PolicyStore>) {
     use agent_armor::demo::scenarios::{demo_profiles, demo_workspace_policies};
 
-    let profiles = storage.list_profiles().await.unwrap_or_default();
+    let profiles = policy_store.list_profiles().await.unwrap_or_default();
     if !profiles.is_empty() {
         return;
     }
 
     tracing::info!("Seeding demo data into database...");
     for profile in demo_profiles() {
-        if let Err(e) = storage.upsert_profile(&profile).await {
+        if let Err(e) = policy_store.upsert_profile(&profile).await {
             tracing::warn!(agent_id = %profile.agent_id, error = %e, "Failed to seed demo profile");
         }
     }
     for workspace in demo_workspace_policies() {
-        if let Err(e) = storage.upsert_workspace(&workspace).await {
+        if let Err(e) = policy_store.upsert_workspace(&workspace).await {
             tracing::warn!(workspace_id = %workspace.workspace_id, error = %e, "Failed to seed demo workspace");
         }
     }
@@ -744,12 +876,11 @@ async fn seed_demo_data(storage: &Arc<SqliteStorage>) {
 async fn cmd_proxy(db_url: &str, agent_id: &str, command: &str, args: Vec<String>) {
     use agent_armor::mcp_proxy::proxy_server::{run_mcp_proxy, McpProxyConfig};
 
-    let storage = SqliteStorage::new(db_url).await.unwrap_or_else(|e| {
-        eprintln!("Failed to open database: {e}");
+    let storage = init_storage_bundle(db_url).await.unwrap_or_else(|e| {
+        eprintln!("{e}");
         process::exit(1);
     });
-    let storage = Arc::new(storage);
-    seed_demo_data(&storage).await;
+    seed_demo_data(&storage.policy_store).await;
 
     let event_bus = EventBus::new(256);
     let webhook_manager = Arc::new(WebhookManager::new(Arc::new(
@@ -757,15 +888,17 @@ async fn cmd_proxy(db_url: &str, agent_id: &str, command: &str, args: Vec<String
     )));
 
     let state = Arc::new(AppState {
-        audit_store: storage.clone(),
-        review_store: storage.clone(),
-        policy_store: storage.clone(),
-        api_key_store: storage.clone(),
+        audit_store: storage.audit_store,
+        review_store: storage.review_store,
+        policy_store: storage.policy_store,
+        api_key_store: storage.api_key_store,
+        tenant_store: storage.tenant_store,
         event_bus,
         webhook_manager,
         behavioral_engine: Arc::new(BehavioralEngine::new()),
         rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
         threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
+        storage_backend: storage.storage_backend,
         env: load_env(),
     });
 
@@ -782,7 +915,45 @@ async fn cmd_proxy(db_url: &str, agent_id: &str, command: &str, args: Vec<String
     }
 }
 
-async fn auto_import_config(storage: &Arc<SqliteStorage>) {
+async fn cmd_mcp_server(db_url: &str, seed_demo: bool) {
+    use agent_armor::mcp_server::server::run_mcp_server;
+
+    let storage = init_storage_bundle(db_url).await.unwrap_or_else(|e| {
+        eprintln!("{e}");
+        process::exit(1);
+    });
+
+    if seed_demo {
+        seed_demo_data(&storage.policy_store).await;
+    }
+
+    let event_bus = EventBus::new(256);
+    let webhook_manager = Arc::new(WebhookManager::new(Arc::new(
+        webhooks::DeadLetterQueue::new(),
+    )));
+
+    let state = Arc::new(AppState {
+        audit_store: storage.audit_store,
+        review_store: storage.review_store,
+        policy_store: storage.policy_store,
+        api_key_store: storage.api_key_store,
+        tenant_store: storage.tenant_store,
+        event_bus,
+        webhook_manager,
+        behavioral_engine: Arc::new(BehavioralEngine::new()),
+        rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
+        threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
+        storage_backend: storage.storage_backend,
+        env: load_env(),
+    });
+
+    if let Err(e) = run_mcp_server(state).await {
+        eprintln!("MCP server error: {e}");
+        process::exit(1);
+    }
+}
+
+async fn auto_import_config(policy_store: &Arc<dyn PolicyStore>) {
     for name in &["agent-armor.yaml", "agent-armor.yml", "agent-armor.json"] {
         if std::path::Path::new(name).exists() {
             tracing::info!(file = name, "Found config file, auto-importing...");
@@ -811,12 +982,12 @@ async fn auto_import_config(storage: &Arc<SqliteStorage>) {
                 };
 
             for p in &config.profiles {
-                if let Err(e) = storage.upsert_profile(p).await {
+                if let Err(e) = policy_store.upsert_profile(p).await {
                     tracing::warn!(agent_id = %p.agent_id, error = %e, "Failed to import profile from config");
                 }
             }
             for w in &config.workspaces {
-                if let Err(e) = storage.upsert_workspace(w).await {
+                if let Err(e) = policy_store.upsert_workspace(w).await {
                     tracing::warn!(workspace_id = %w.workspace_id, error = %e, "Failed to import workspace from config");
                 }
             }

@@ -1,17 +1,20 @@
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Request, State},
+    http::{HeaderValue, StatusCode},
     middleware as axum_middleware,
-    response::{Html, IntoResponse, Json},
+    response::{Html, IntoResponse, Json, Response},
     routing::{delete, get, post, put},
     Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Instant;
 use tower_http::cors::CorsLayer;
+use uuid::Uuid;
 
 use crate::auth::api_keys::generate_api_key;
 use crate::auth::middleware::auth_middleware;
+use crate::auth::middleware::is_open_mode_enabled;
 use crate::core::errors::ArmorError;
 use crate::core::types::*;
 use crate::dashboard::index_html::render_dashboard_html;
@@ -30,10 +33,15 @@ use crate::pipeline::execute_pipeline::{execute_pipeline, get_sensitive_patterns
 use crate::server::app_state::AppState;
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct HealthResponse {
     ok: bool,
     service: String,
     mode: String,
+    version: String,
+    auth_required: bool,
+    open_mode: bool,
+    api_keys_configured: bool,
 }
 
 #[derive(Deserialize)]
@@ -62,19 +70,11 @@ struct CreateWebhookBody {
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
-    let mode = state.env.default_mode.to_string();
-
     // Public routes (no auth)
-    let public = Router::new().route("/", get(dashboard_handler)).route(
-        "/health",
-        get(move || async move {
-            Json(HealthResponse {
-                ok: true,
-                service: "agent-armor".into(),
-                mode: mode.clone(),
-            })
-        }),
-    );
+    let public = Router::new()
+        .route("/", get(dashboard_handler))
+        .route("/health", get(health_handler))
+        .route("/dashboard/context", get(health_handler));
 
     // Protected routes (auth middleware)
     let protected = Router::new()
@@ -198,6 +198,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     public
         .merge(protected)
+        .layer(axum_middleware::from_fn(request_logging_middleware))
         .layer({
             use axum::http::{header, Method};
             CorsLayer::new()
@@ -208,10 +209,90 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+async fn request_logging_middleware(request: Request, next: axum::middleware::Next) -> Response {
+    const REQUEST_ID_HEADER: &str = "x-request-id";
+
+    let mut request = request;
+    let request_id = request
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    if let Ok(header) = HeaderValue::from_str(&request_id) {
+        request.headers_mut().insert(REQUEST_ID_HEADER, header);
+    }
+
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let started_at = Instant::now();
+
+    let mut response = next.run(request).await;
+    let status = response.status();
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+
+    if let Ok(header) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert(REQUEST_ID_HEADER, header);
+    }
+
+    if status.is_server_error() {
+        tracing::error!(
+            request_id = %request_id,
+            method = %method,
+            path = %path,
+            status = status.as_u16(),
+            elapsed_ms,
+            "http request completed"
+        );
+    } else if status.is_client_error() {
+        tracing::warn!(
+            request_id = %request_id,
+            method = %method,
+            path = %path,
+            status = status.as_u16(),
+            elapsed_ms,
+            "http request completed"
+        );
+    } else {
+        tracing::info!(
+            request_id = %request_id,
+            method = %method,
+            path = %path,
+            status = status.as_u16(),
+            elapsed_ms,
+            "http request completed"
+        );
+    }
+
+    response
+}
+
 // ── Dashboard ──
 
 async fn dashboard_handler() -> Html<String> {
     Html(render_dashboard_html())
+}
+
+async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+    let api_keys_configured = state
+        .api_key_store
+        .list_keys()
+        .await
+        .map(|keys| !keys.is_empty())
+        .unwrap_or(false);
+    let open_mode = is_open_mode_enabled();
+
+    Json(HealthResponse {
+        ok: true,
+        service: "agent-armor".into(),
+        mode: state.env.default_mode.to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        auth_required: api_keys_configured || !open_mode,
+        open_mode,
+        api_keys_configured,
+    })
 }
 
 // ── Core Pipeline ──
@@ -223,6 +304,7 @@ async fn inspect_handler(
     let result = execute_pipeline(&payload, &state).await?;
 
     tracing::info!(
+        trace_id = %result.trace_id,
         agent_id = %payload.agent_id,
         tool_name = %payload.action.tool_name,
         decision = ?result.decision,
@@ -253,6 +335,8 @@ struct AuditExportQuery {
     #[serde(default)]
     format: Option<String>,
     #[serde(default)]
+    tenant_id: Option<String>,
+    #[serde(default)]
     agent_id: Option<String>,
     #[serde(default)]
     decision: Option<String>,
@@ -269,6 +353,7 @@ async fn audit_export_handler(
     axum::extract::Query(query): axum::extract::Query<AuditExportQuery>,
 ) -> Result<impl IntoResponse, ArmorError> {
     let filter = AuditExportFilter {
+        tenant_id: query.tenant_id,
         agent_id: query.agent_id,
         decision: query.decision,
         from_date: query.from_date,

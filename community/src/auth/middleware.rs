@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::server::app_state::AppState;
 
 /// Returns true if the AGENT_ARMOR_OPEN_MODE env var is explicitly set to "true".
-fn is_open_mode_enabled() -> bool {
+pub fn is_open_mode_enabled() -> bool {
     std::env::var("AGENT_ARMOR_OPEN_MODE")
         .map(|v| v == "true")
         .unwrap_or(false)

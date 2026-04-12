@@ -1,22 +1,25 @@
 use async_trait::async_trait;
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::postgres::{PgPool, PgPoolOptions};
 
-use super::migrations::run_sqlite_migrations;
+use super::migrations::run_postgres_migrations;
 use super::traits::*;
 use crate::core::errors::ArmorError;
 use crate::core::types::*;
 
-pub struct SqliteStorage {
-    pool: SqlitePool,
+pub struct PostgresStorage {
+    pool: PgPool,
 }
 
-impl SqliteStorage {
+impl PostgresStorage {
     pub async fn new(database_url: &str) -> Result<Self, ArmorError> {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
+        let pool = PgPoolOptions::new()
+            .max_connections(20)
+            .min_connections(2)
+            .acquire_timeout(std::time::Duration::from_secs(10))
+            .idle_timeout(std::time::Duration::from_secs(300))
             .connect(database_url)
             .await
-            .map_err(|e| ArmorError::Storage(format!("Failed to connect to SQLite: {e}")))?;
+            .map_err(|e| ArmorError::Storage(format!("Failed to connect to PostgreSQL: {e}")))?;
 
         let storage = Self { pool };
         storage.run_migrations().await?;
@@ -24,10 +27,10 @@ impl SqliteStorage {
     }
 
     async fn run_migrations(&self) -> Result<(), ArmorError> {
-        run_sqlite_migrations(&self.pool).await
+        run_postgres_migrations(&self.pool).await
     }
 
-    pub fn pool(&self) -> &SqlitePool {
+    pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 }
@@ -35,7 +38,7 @@ impl SqliteStorage {
 // ── AuditStore ──
 
 #[async_trait]
-impl AuditStore for SqliteStorage {
+impl AuditStore for PostgresStorage {
     async fn append(&self, event: &StoredAuditEvent) -> Result<(), ArmorError> {
         let reasons = serde_json::to_string(&event.reasons).unwrap_or_default();
         let decision = serde_json::to_value(event.decision)
@@ -56,7 +59,7 @@ impl AuditStore for SqliteStorage {
 
         sqlx::query(
             "INSERT INTO audit_events (event_id, agent_id, tenant_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons, timestamp)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)"
         )
         .bind(&event.event_id)
         .bind(&event.agent_id)
@@ -76,15 +79,15 @@ impl AuditStore for SqliteStorage {
     }
 
     async fn list(&self, limit: u32) -> Result<Vec<StoredAuditEvent>, ArmorError> {
-        let rows = sqlx::query_as::<_, AuditRow>(
-            "SELECT event_id, agent_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons, timestamp
-             FROM audit_events ORDER BY created_at DESC LIMIT ?"
+        let rows = sqlx::query(
+            "SELECT event_id, agent_id, tenant_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons::text, timestamp
+             FROM audit_events ORDER BY created_at DESC LIMIT $1"
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|r| r.into_stored()).collect())
+        Ok(rows.iter().map(|r| pg_row_to_audit(r)).collect())
     }
 
     async fn list_filtered(
@@ -96,25 +99,28 @@ impl AuditStore for SqliteStorage {
         let decision = filter.decision.clone().unwrap_or_default();
         let from = filter.from_date.clone().unwrap_or_default();
         let to = filter.to_date.clone().unwrap_or_default();
+        let tenant = filter.tenant_id.clone().unwrap_or_default();
 
-        let rows = sqlx::query_as::<_, AuditRow>(
-            "SELECT event_id, agent_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons, timestamp
+        let rows = sqlx::query(
+            "SELECT event_id, agent_id, tenant_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons::text, timestamp
              FROM audit_events
-             WHERE (? = '' OR agent_id = ?)
-               AND (? = '' OR decision = ?)
-               AND (? = '' OR timestamp >= ?)
-               AND (? = '' OR timestamp <= ?)
-             ORDER BY created_at DESC LIMIT ?"
+             WHERE ($1 = '' OR agent_id = $1)
+               AND ($2 = '' OR decision = $2)
+               AND ($3 = '' OR timestamp >= $3)
+               AND ($4 = '' OR timestamp <= $4)
+               AND ($5 = '' OR tenant_id = $5)
+             ORDER BY created_at DESC LIMIT $6"
         )
-        .bind(&agent).bind(&agent)
-        .bind(&decision).bind(&decision)
-        .bind(&from).bind(&from)
-        .bind(&to).bind(&to)
+        .bind(&agent)
+        .bind(&decision)
+        .bind(&from)
+        .bind(&to)
+        .bind(&tenant)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|r| r.into_stored()).collect())
+        Ok(rows.iter().map(|r| pg_row_to_audit(r)).collect())
     }
 
     async fn stats(&self) -> Result<AuditStats, ArmorError> {
@@ -194,14 +200,13 @@ impl AuditStore for SqliteStorage {
                     COUNT(*) as total,
                     AVG(risk_score) as avg_risk,
                     MAX(timestamp) as last_ts,
-                    GROUP_CONCAT(DISTINCT decision) as decisions_csv,
-                    GROUP_CONCAT(tool_name) as tools_csv
+                    STRING_AGG(DISTINCT decision, ',') as decisions_csv,
+                    STRING_AGG(tool_name, ',') as tools_csv
              FROM audit_events
-             WHERE ? = '' OR agent_id = ?
+             WHERE $1 = '' OR agent_id = $1
              GROUP BY agent_id
              ORDER BY total DESC",
         )
-        .bind(agent_filter)
         .bind(agent_filter)
         .fetch_all(&self.pool)
         .await?;
@@ -214,9 +219,8 @@ impl AuditStore for SqliteStorage {
             let last_ts: String = row.try_get("last_ts").unwrap_or_default();
             let tools_csv: String = row.try_get("tools_csv").unwrap_or_default();
 
-            // Count decisions per type
             let decision_rows = sqlx::query(
-                "SELECT decision, COUNT(*) as cnt FROM audit_events WHERE agent_id = ? GROUP BY decision",
+                "SELECT decision, COUNT(*) as cnt FROM audit_events WHERE agent_id = $1 GROUP BY decision",
             )
             .bind(&aid)
             .fetch_all(&self.pool)
@@ -229,7 +233,6 @@ impl AuditStore for SqliteStorage {
                 decisions.insert(d, c as u64);
             }
 
-            // Count tool usage
             let mut tool_counts: std::collections::HashMap<String, u64> =
                 std::collections::HashMap::new();
             for tool in tools_csv.split(',') {
@@ -259,64 +262,10 @@ impl AuditStore for SqliteStorage {
     }
 }
 
-struct AuditRow {
-    event_id: String,
-    agent_id: String,
-    tenant_id: Option<String>,
-    framework: String,
-    action_type: String,
-    tool_name: String,
-    decision: String,
-    risk_score: i64,
-    review_status: String,
-    reasons: String,
-    timestamp: String,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for AuditRow {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row;
-        Ok(Self {
-            event_id: row.try_get("event_id")?,
-            agent_id: row.try_get("agent_id")?,
-            tenant_id: row.try_get("tenant_id").unwrap_or(None),
-            framework: row.try_get("framework")?,
-            action_type: row.try_get("action_type")?,
-            tool_name: row.try_get("tool_name")?,
-            decision: row.try_get("decision")?,
-            risk_score: row.try_get("risk_score")?,
-            review_status: row.try_get("review_status")?,
-            reasons: row.try_get("reasons")?,
-            timestamp: row.try_get("timestamp")?,
-        })
-    }
-}
-
-impl AuditRow {
-    fn into_stored(self) -> StoredAuditEvent {
-        StoredAuditEvent {
-            event_id: self.event_id,
-            agent_id: self.agent_id,
-            tenant_id: self.tenant_id,
-            framework: self.framework,
-            action_type: serde_json::from_value(serde_json::Value::String(self.action_type))
-                .unwrap_or(ActionType::Custom),
-            tool_name: self.tool_name,
-            decision: serde_json::from_value(serde_json::Value::String(self.decision))
-                .unwrap_or(GovernanceDecision::Block),
-            risk_score: self.risk_score as u32,
-            review_status: serde_json::from_value(serde_json::Value::String(self.review_status))
-                .unwrap_or(ReviewStatus::NotRequired),
-            reasons: serde_json::from_str(&self.reasons).unwrap_or_default(),
-            timestamp: self.timestamp,
-        }
-    }
-}
-
 // ── ReviewStore ──
 
 #[async_trait]
-impl ReviewStore for SqliteStorage {
+impl ReviewStore for PostgresStorage {
     async fn create(&self, review: &ReviewRequest) -> Result<(), ArmorError> {
         let reasons = serde_json::to_string(&review.reasons).unwrap_or_default();
         let decision = serde_json::to_value(review.decision)
@@ -327,7 +276,7 @@ impl ReviewStore for SqliteStorage {
 
         sqlx::query(
             "INSERT INTO review_requests (id, agent_id, workspace_id, tool_name, decision, status, risk_score, reasons, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)"
         )
         .bind(&review.id)
         .bind(&review.agent_id)
@@ -346,21 +295,21 @@ impl ReviewStore for SqliteStorage {
     }
 
     async fn get(&self, id: &str) -> Result<ReviewRequest, ArmorError> {
-        let row = sqlx::query_as::<_, ReviewRow>(
-            "SELECT id, agent_id, workspace_id, tool_name, decision, status, risk_score, reasons, created_at, updated_at
-             FROM review_requests WHERE id = ?"
+        let row = sqlx::query(
+            "SELECT id, agent_id, workspace_id, tool_name, decision, status, risk_score, reasons::text, created_at, updated_at
+             FROM review_requests WHERE id = $1"
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| ArmorError::ReviewNotFound(id.to_string()))?;
 
-        Ok(row.into_review())
+        Ok(pg_row_to_review(&row))
     }
 
     async fn update_status(&self, id: &str, status: &str) -> Result<ReviewRequest, ArmorError> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query("UPDATE review_requests SET status = ?, updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE review_requests SET status = $1, updated_at = $2 WHERE id = $3")
             .bind(status)
             .bind(&now)
             .bind(id)
@@ -371,119 +320,70 @@ impl ReviewStore for SqliteStorage {
     }
 
     async fn list(&self) -> Result<Vec<ReviewRequest>, ArmorError> {
-        let rows = sqlx::query_as::<_, ReviewRow>(
-            "SELECT id, agent_id, workspace_id, tool_name, decision, status, risk_score, reasons, created_at, updated_at
+        let rows = sqlx::query(
+            "SELECT id, agent_id, workspace_id, tool_name, decision, status, risk_score, reasons::text, created_at, updated_at
              FROM review_requests ORDER BY created_at ASC"
         )
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|r| r.into_review()).collect())
-    }
-}
-
-struct ReviewRow {
-    id: String,
-    agent_id: String,
-    workspace_id: String,
-    tool_name: String,
-    decision: String,
-    status: String,
-    risk_score: i64,
-    reasons: String,
-    created_at: String,
-    updated_at: String,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ReviewRow {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row;
-        Ok(Self {
-            id: row.try_get("id")?,
-            agent_id: row.try_get("agent_id")?,
-            workspace_id: row.try_get("workspace_id")?,
-            tool_name: row.try_get("tool_name")?,
-            decision: row.try_get("decision")?,
-            status: row.try_get("status")?,
-            risk_score: row.try_get("risk_score")?,
-            reasons: row.try_get("reasons")?,
-            created_at: row.try_get("created_at")?,
-            updated_at: row.try_get("updated_at")?,
-        })
-    }
-}
-
-impl ReviewRow {
-    fn into_review(self) -> ReviewRequest {
-        ReviewRequest {
-            id: self.id,
-            agent_id: self.agent_id,
-            workspace_id: self.workspace_id,
-            tool_name: self.tool_name,
-            decision: serde_json::from_value(serde_json::Value::String(self.decision))
-                .unwrap_or(GovernanceDecision::Review),
-            status: self.status,
-            risk_score: self.risk_score as u32,
-            reasons: serde_json::from_str(&self.reasons).unwrap_or_default(),
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-        }
+        Ok(rows.iter().map(|r| pg_row_to_review(r)).collect())
     }
 }
 
 // ── PolicyStore ──
 
 #[async_trait]
-impl PolicyStore for SqliteStorage {
+impl PolicyStore for PostgresStorage {
     async fn get_agent_profile(&self, agent_id: &str) -> Result<AgentProfile, ArmorError> {
-        let row = sqlx::query_as::<_, ProfileRow>(
-            "SELECT agent_id, tenant_id, workspace_id, framework, role, approved_tools, approved_secrets, baseline_action_types
-             FROM agent_profiles WHERE agent_id = ?"
+        let row = sqlx::query(
+            "SELECT agent_id, tenant_id, workspace_id, framework, role, approved_tools::text, approved_secrets::text, baseline_action_types::text
+             FROM agent_profiles WHERE agent_id = $1"
         )
         .bind(agent_id)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| ArmorError::AgentNotFound(agent_id.to_string()))?;
 
-        Ok(row.into_profile())
+        Ok(pg_row_to_profile(&row))
     }
 
     async fn get_workspace_policy(
         &self,
         workspace_id: &str,
     ) -> Result<WorkspacePolicy, ArmorError> {
-        let row = sqlx::query_as::<_, WorkspaceRow>(
-            "SELECT workspace_id, tenant_id, allowed_protocols, allowed_domains, tools, threshold_block, threshold_review
-             FROM workspace_policies WHERE workspace_id = ?",
+        let row = sqlx::query(
+            "SELECT workspace_id, tenant_id, allowed_protocols::text, allowed_domains::text, tools::text, threshold_block, threshold_review
+             FROM workspace_policies WHERE workspace_id = $1",
         )
         .bind(workspace_id)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| ArmorError::WorkspaceNotFound(workspace_id.to_string()))?;
 
-        Ok(row.into_policy())
+        Ok(pg_row_to_workspace(&row))
     }
 
     async fn list_profiles(&self) -> Result<Vec<AgentProfile>, ArmorError> {
-        let rows = sqlx::query_as::<_, ProfileRow>(
-            "SELECT agent_id, tenant_id, workspace_id, framework, role, approved_tools, approved_secrets, baseline_action_types
+        let rows = sqlx::query(
+            "SELECT agent_id, tenant_id, workspace_id, framework, role, approved_tools::text, approved_secrets::text, baseline_action_types::text
              FROM agent_profiles ORDER BY agent_id"
         )
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|r| r.into_profile()).collect())
+        Ok(rows.iter().map(|r| pg_row_to_profile(r)).collect())
     }
 
     async fn list_workspaces(&self) -> Result<Vec<WorkspacePolicy>, ArmorError> {
-        let rows = sqlx::query_as::<_, WorkspaceRow>(
-            "SELECT workspace_id, tenant_id, allowed_protocols, allowed_domains, tools, threshold_block, threshold_review
+        let rows = sqlx::query(
+            "SELECT workspace_id, tenant_id, allowed_protocols::text, allowed_domains::text, tools::text, threshold_block, threshold_review
              FROM workspace_policies ORDER BY workspace_id",
         )
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|r| r.into_policy()).collect())
+        Ok(rows.iter().map(|r| pg_row_to_workspace(r)).collect())
     }
 
     async fn upsert_profile(&self, profile: &AgentProfile) -> Result<(), ArmorError> {
@@ -495,20 +395,19 @@ impl PolicyStore for SqliteStorage {
             .as_str()
             .unwrap_or("builder")
             .to_string();
-        let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(
             "INSERT INTO agent_profiles (agent_id, tenant_id, workspace_id, framework, role, approved_tools, approved_secrets, baseline_action_types, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, NOW())
              ON CONFLICT(agent_id) DO UPDATE SET
-                tenant_id = excluded.tenant_id,
-                workspace_id = excluded.workspace_id,
-                framework = excluded.framework,
-                role = excluded.role,
-                approved_tools = excluded.approved_tools,
-                approved_secrets = excluded.approved_secrets,
-                baseline_action_types = excluded.baseline_action_types,
-                updated_at = excluded.updated_at"
+                tenant_id = EXCLUDED.tenant_id,
+                workspace_id = EXCLUDED.workspace_id,
+                framework = EXCLUDED.framework,
+                role = EXCLUDED.role,
+                approved_tools = EXCLUDED.approved_tools,
+                approved_secrets = EXCLUDED.approved_secrets,
+                baseline_action_types = EXCLUDED.baseline_action_types,
+                updated_at = NOW()"
         )
         .bind(&profile.agent_id)
         .bind(&profile.tenant_id)
@@ -518,7 +417,6 @@ impl PolicyStore for SqliteStorage {
         .bind(&tools)
         .bind(&secrets)
         .bind(&baselines)
-        .bind(&now)
         .execute(&self.pool)
         .await?;
 
@@ -529,19 +427,18 @@ impl PolicyStore for SqliteStorage {
         let protocols = serde_json::to_string(&policy.allowed_protocols).unwrap_or_default();
         let domains = serde_json::to_string(&policy.allowed_domains).unwrap_or_default();
         let tools = serde_json::to_string(&policy.tools).unwrap_or_default();
-        let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(
             "INSERT INTO workspace_policies (workspace_id, tenant_id, allowed_protocols, allowed_domains, tools, threshold_block, threshold_review, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7, NOW())
              ON CONFLICT(workspace_id) DO UPDATE SET
-                tenant_id = excluded.tenant_id,
-                allowed_protocols = excluded.allowed_protocols,
-                allowed_domains = excluded.allowed_domains,
-                tools = excluded.tools,
-                threshold_block = excluded.threshold_block,
-                threshold_review = excluded.threshold_review,
-                updated_at = excluded.updated_at"
+                tenant_id = EXCLUDED.tenant_id,
+                allowed_protocols = EXCLUDED.allowed_protocols,
+                allowed_domains = EXCLUDED.allowed_domains,
+                tools = EXCLUDED.tools,
+                threshold_block = EXCLUDED.threshold_block,
+                threshold_review = EXCLUDED.threshold_review,
+                updated_at = NOW()"
         )
         .bind(&policy.workspace_id)
         .bind(&policy.tenant_id)
@@ -550,7 +447,6 @@ impl PolicyStore for SqliteStorage {
         .bind(&tools)
         .bind(policy.threshold_block as i64)
         .bind(policy.threshold_review as i64)
-        .bind(&now)
         .execute(&self.pool)
         .await?;
 
@@ -558,7 +454,7 @@ impl PolicyStore for SqliteStorage {
     }
 
     async fn delete_profile(&self, agent_id: &str) -> Result<(), ArmorError> {
-        sqlx::query("DELETE FROM agent_profiles WHERE agent_id = ?")
+        sqlx::query("DELETE FROM agent_profiles WHERE agent_id = $1")
             .bind(agent_id)
             .execute(&self.pool)
             .await?;
@@ -566,7 +462,7 @@ impl PolicyStore for SqliteStorage {
     }
 
     async fn delete_workspace(&self, workspace_id: &str) -> Result<(), ArmorError> {
-        sqlx::query("DELETE FROM workspace_policies WHERE workspace_id = ?")
+        sqlx::query("DELETE FROM workspace_policies WHERE workspace_id = $1")
             .bind(workspace_id)
             .execute(&self.pool)
             .await?;
@@ -574,94 +470,10 @@ impl PolicyStore for SqliteStorage {
     }
 }
 
-struct ProfileRow {
-    agent_id: String,
-    tenant_id: Option<String>,
-    workspace_id: String,
-    framework: String,
-    role: String,
-    approved_tools: String,
-    approved_secrets: String,
-    baseline_action_types: String,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ProfileRow {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row;
-        Ok(Self {
-            agent_id: row.try_get("agent_id")?,
-            tenant_id: row.try_get("tenant_id").unwrap_or(None),
-            workspace_id: row.try_get("workspace_id")?,
-            framework: row.try_get("framework")?,
-            role: row.try_get("role")?,
-            approved_tools: row.try_get("approved_tools")?,
-            approved_secrets: row.try_get("approved_secrets")?,
-            baseline_action_types: row.try_get("baseline_action_types")?,
-        })
-    }
-}
-
-impl ProfileRow {
-    fn into_profile(self) -> AgentProfile {
-        AgentProfile {
-            agent_id: self.agent_id,
-            tenant_id: self.tenant_id,
-            workspace_id: self.workspace_id,
-            framework: self.framework,
-            role: serde_json::from_value(serde_json::Value::String(self.role))
-                .unwrap_or(AgentRole::Builder),
-            approved_tools: serde_json::from_str(&self.approved_tools).unwrap_or_default(),
-            approved_secrets: serde_json::from_str(&self.approved_secrets).unwrap_or_default(),
-            baseline_action_types: serde_json::from_str(&self.baseline_action_types)
-                .unwrap_or_default(),
-            tool_trust: 0.7,
-        }
-    }
-}
-
-struct WorkspaceRow {
-    workspace_id: String,
-    tenant_id: Option<String>,
-    allowed_protocols: String,
-    allowed_domains: String,
-    tools: String,
-    threshold_block: i64,
-    threshold_review: i64,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for WorkspaceRow {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row;
-        Ok(Self {
-            workspace_id: row.try_get("workspace_id")?,
-            tenant_id: row.try_get("tenant_id").unwrap_or(None),
-            allowed_protocols: row.try_get("allowed_protocols")?,
-            allowed_domains: row.try_get("allowed_domains")?,
-            tools: row.try_get("tools")?,
-            threshold_block: row.try_get("threshold_block").unwrap_or(70),
-            threshold_review: row.try_get("threshold_review").unwrap_or(35),
-        })
-    }
-}
-
-impl WorkspaceRow {
-    fn into_policy(self) -> WorkspacePolicy {
-        WorkspacePolicy {
-            workspace_id: self.workspace_id,
-            tenant_id: self.tenant_id,
-            allowed_protocols: serde_json::from_str(&self.allowed_protocols).unwrap_or_default(),
-            allowed_domains: serde_json::from_str(&self.allowed_domains).unwrap_or_default(),
-            tools: serde_json::from_str(&self.tools).unwrap_or_default(),
-            threshold_block: self.threshold_block as u32,
-            threshold_review: self.threshold_review as u32,
-        }
-    }
-}
-
 // ── ApiKeyStore ──
 
 #[async_trait]
-impl ApiKeyStore for SqliteStorage {
+impl ApiKeyStore for PostgresStorage {
     async fn store_key(
         &self,
         key_id: &str,
@@ -670,20 +482,22 @@ impl ApiKeyStore for SqliteStorage {
         raw_key: &str,
     ) -> Result<(), ArmorError> {
         let prefix = &raw_key[..raw_key.len().min(8)];
-        sqlx::query("INSERT INTO api_keys (id, key_hash, key_prefix, label) VALUES (?, ?, ?, ?)")
-            .bind(key_id)
-            .bind(key_hash)
-            .bind(prefix)
-            .bind(label)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "INSERT INTO api_keys (id, key_hash, key_prefix, label) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(key_id)
+        .bind(key_hash)
+        .bind(prefix)
+        .bind(label)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     async fn verify_raw_key(&self, raw_key: &str) -> Result<bool, ArmorError> {
         let prefix = &raw_key[..raw_key.len().min(8)];
         let hashes =
-            sqlx::query_scalar::<_, String>("SELECT key_hash FROM api_keys WHERE key_prefix = ?")
+            sqlx::query_scalar::<_, String>("SELECT key_hash FROM api_keys WHERE key_prefix = $1")
                 .bind(prefix)
                 .fetch_all(&self.pool)
                 .await?;
@@ -697,7 +511,7 @@ impl ApiKeyStore for SqliteStorage {
     }
 
     async fn delete_key(&self, key_id: &str) -> Result<(), ArmorError> {
-        sqlx::query("DELETE FROM api_keys WHERE id = ?")
+        sqlx::query("DELETE FROM api_keys WHERE id = $1")
             .bind(key_id)
             .execute(&self.pool)
             .await?;
@@ -705,50 +519,34 @@ impl ApiKeyStore for SqliteStorage {
     }
 
     async fn list_keys(&self) -> Result<Vec<ApiKeyRecord>, ArmorError> {
-        let rows = sqlx::query_as::<_, ApiKeyRow>(
-            "SELECT id, label, created_at FROM api_keys ORDER BY created_at DESC",
+        use sqlx::Row;
+        let rows = sqlx::query(
+            "SELECT id, label, created_at::text FROM api_keys ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
-            .into_iter()
+            .iter()
             .map(|r| ApiKeyRecord {
-                id: r.id,
-                label: r.label,
-                created_at: r.created_at,
+                id: r.try_get("id").unwrap_or_default(),
+                label: r.try_get("label").unwrap_or_default(),
+                created_at: r.try_get("created_at").unwrap_or_default(),
             })
             .collect())
-    }
-}
-
-struct ApiKeyRow {
-    id: String,
-    label: String,
-    created_at: String,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ApiKeyRow {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row;
-        Ok(Self {
-            id: row.try_get("id")?,
-            label: row.try_get("label")?,
-            created_at: row.try_get("created_at")?,
-        })
     }
 }
 
 // ── TenantStore ──
 
 #[async_trait]
-impl TenantStore for SqliteStorage {
+impl TenantStore for PostgresStorage {
     async fn create_tenant(&self, tenant: &Tenant) -> Result<(), ArmorError> {
         let metadata = tenant
             .metadata
             .as_ref()
             .map(|m| serde_json::to_string(m).unwrap_or_default());
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, enabled, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO tenants (tenant_id, name, enabled, metadata, created_at) VALUES ($1, $2, $3, $4::jsonb, $5)",
         )
         .bind(&tenant.tenant_id)
         .bind(&tenant.name)
@@ -763,7 +561,7 @@ impl TenantStore for SqliteStorage {
     async fn get_tenant(&self, tenant_id: &str) -> Result<Tenant, ArmorError> {
         use sqlx::Row;
         let row = sqlx::query(
-            "SELECT tenant_id, name, enabled, metadata, created_at FROM tenants WHERE tenant_id = ?",
+            "SELECT tenant_id, name, enabled, metadata::text, created_at::text FROM tenants WHERE tenant_id = $1",
         )
         .bind(tenant_id)
         .fetch_optional(&self.pool)
@@ -783,7 +581,7 @@ impl TenantStore for SqliteStorage {
     async fn list_tenants(&self) -> Result<Vec<Tenant>, ArmorError> {
         use sqlx::Row;
         let rows = sqlx::query(
-            "SELECT tenant_id, name, enabled, metadata, created_at FROM tenants ORDER BY created_at",
+            "SELECT tenant_id, name, enabled, metadata::text, created_at::text FROM tenants ORDER BY created_at",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -803,10 +601,127 @@ impl TenantStore for SqliteStorage {
     }
 
     async fn delete_tenant(&self, tenant_id: &str) -> Result<(), ArmorError> {
-        sqlx::query("DELETE FROM tenants WHERE tenant_id = ?")
+        sqlx::query("DELETE FROM tenants WHERE tenant_id = $1")
             .bind(tenant_id)
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+}
+
+// ── Helper functions ──
+
+fn pg_row_to_audit(row: &sqlx::postgres::PgRow) -> StoredAuditEvent {
+    use sqlx::Row;
+    StoredAuditEvent {
+        event_id: row.try_get("event_id").unwrap_or_default(),
+        agent_id: row.try_get("agent_id").unwrap_or_default(),
+        tenant_id: row.try_get("tenant_id").unwrap_or(None),
+        framework: row.try_get("framework").unwrap_or_default(),
+        action_type: {
+            let s: String = row.try_get("action_type").unwrap_or_default();
+            serde_json::from_value(serde_json::Value::String(s)).unwrap_or(ActionType::Custom)
+        },
+        tool_name: row.try_get("tool_name").unwrap_or_default(),
+        decision: {
+            let s: String = row.try_get("decision").unwrap_or_default();
+            serde_json::from_value(serde_json::Value::String(s))
+                .unwrap_or(GovernanceDecision::Block)
+        },
+        risk_score: {
+            let v: i64 = row.try_get("risk_score").unwrap_or(0);
+            v as u32
+        },
+        review_status: {
+            let s: String = row.try_get("review_status").unwrap_or_default();
+            serde_json::from_value(serde_json::Value::String(s))
+                .unwrap_or(ReviewStatus::NotRequired)
+        },
+        reasons: {
+            let s: String = row.try_get("reasons").unwrap_or_default();
+            serde_json::from_str(&s).unwrap_or_default()
+        },
+        timestamp: row.try_get("timestamp").unwrap_or_default(),
+    }
+}
+
+fn pg_row_to_review(row: &sqlx::postgres::PgRow) -> ReviewRequest {
+    use sqlx::Row;
+    ReviewRequest {
+        id: row.try_get("id").unwrap_or_default(),
+        agent_id: row.try_get("agent_id").unwrap_or_default(),
+        workspace_id: row.try_get("workspace_id").unwrap_or_default(),
+        tool_name: row.try_get("tool_name").unwrap_or_default(),
+        decision: {
+            let s: String = row.try_get("decision").unwrap_or_default();
+            serde_json::from_value(serde_json::Value::String(s))
+                .unwrap_or(GovernanceDecision::Review)
+        },
+        status: row.try_get("status").unwrap_or_default(),
+        risk_score: {
+            let v: i64 = row.try_get("risk_score").unwrap_or(0);
+            v as u32
+        },
+        reasons: {
+            let s: String = row.try_get("reasons").unwrap_or_default();
+            serde_json::from_str(&s).unwrap_or_default()
+        },
+        created_at: row.try_get("created_at").unwrap_or_default(),
+        updated_at: row.try_get("updated_at").unwrap_or_default(),
+    }
+}
+
+fn pg_row_to_profile(row: &sqlx::postgres::PgRow) -> AgentProfile {
+    use sqlx::Row;
+    AgentProfile {
+        agent_id: row.try_get("agent_id").unwrap_or_default(),
+        tenant_id: row.try_get("tenant_id").unwrap_or(None),
+        workspace_id: row.try_get("workspace_id").unwrap_or_default(),
+        framework: row.try_get("framework").unwrap_or_default(),
+        role: {
+            let s: String = row.try_get("role").unwrap_or_default();
+            serde_json::from_value(serde_json::Value::String(s)).unwrap_or(AgentRole::Builder)
+        },
+        approved_tools: {
+            let s: String = row.try_get("approved_tools").unwrap_or_default();
+            serde_json::from_str(&s).unwrap_or_default()
+        },
+        approved_secrets: {
+            let s: String = row.try_get("approved_secrets").unwrap_or_default();
+            serde_json::from_str(&s).unwrap_or_default()
+        },
+        baseline_action_types: {
+            let s: String = row.try_get("baseline_action_types").unwrap_or_default();
+            serde_json::from_str(&s).unwrap_or_default()
+        },
+        tool_trust: 0.7,
+    }
+}
+
+fn pg_row_to_workspace(row: &sqlx::postgres::PgRow) -> WorkspacePolicy {
+    use sqlx::Row;
+    WorkspacePolicy {
+        workspace_id: row.try_get("workspace_id").unwrap_or_default(),
+        tenant_id: row.try_get("tenant_id").unwrap_or(None),
+        allowed_protocols: {
+            let s: String = row.try_get("allowed_protocols").unwrap_or_default();
+            serde_json::from_str(&s).unwrap_or_default()
+        },
+        allowed_domains: {
+            let s: String = row.try_get("allowed_domains").unwrap_or_default();
+            serde_json::from_str(&s).unwrap_or_default()
+        },
+        tools: {
+            let s: String = row.try_get("tools").unwrap_or_default();
+            serde_json::from_str(&s).unwrap_or_default()
+        },
+        threshold_block: {
+            let v: i64 = row.try_get("threshold_block").unwrap_or(70);
+            v as u32
+        },
+        threshold_review: {
+            let v: i64 = row.try_get("threshold_review").unwrap_or(35);
+            v as u32
+        },
     }
 }

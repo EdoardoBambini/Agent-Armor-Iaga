@@ -2,73 +2,111 @@
 
 ## Goal
 
-Show how Agent Armor governs agent actions through all 8 security layers.
+Show the current `v0.3.0` community runtime governing real HTTP requests through the server.
 
-## Local Run
+## Start The Runtime
 
 ```bash
 cd community
-cargo run
+cargo build --release
+./target/release/agent-armor gen-key --label demo
+./target/release/agent-armor serve
 ```
 
-Open `http://localhost:4010` for the dashboard.
+Open `http://localhost:4010` for the embedded dashboard.
 
-## What the Demo Shows
+## Demo Scenarios
 
-### Scenario 1 — Safe File Read
+### Scenario 1 - Safe File Read
 
-An agent performs a safe MCP file read. Low risk score, matches policy, passes all 8 layers → **ALLOW**.
+A builder agent reads a normal file via `filesystem.read`.
 
-### Scenario 2 — Shell Exec with Secret
+Expected result:
 
-The agent asks to run `git push` with a GitHub secret reference. Tool is allowed but capped at `review` in workspace policy → **REVIEW** (requires human approval).
+- `allow`
+- low risk
+- audit event recorded
 
-### Scenario 3 — Destructive Command
+### Scenario 2 - Controlled Shell Command
 
-The agent tries `rm -rf /var/lib/postgresql`. High-risk shell pattern detected at Layer 4, sandbox flags destructive impact at Layer 5 → **BLOCK** (risk score 95).
+A builder agent requests a shell action that is policy-capped to review.
 
-### Scenario 4 — Unauthorized Secret
+Expected result:
 
-A researcher agent requests a secret it does not own. Vault denies the secret reference, escalated for review → **REVIEW**.
+- `review`
+- review item created
 
-## HTTP Mode
+### Scenario 3 - Destructive Command
+
+An agent attempts `rm -rf /`.
+
+Expected result:
+
+- `block`
+- high risk score
+- audit event recorded
+
+### Scenario 4 - Sensitive Output Scan
+
+A tool response contains an AWS key-like value.
+
+Expected result:
+
+- `review` or `block` depending on payload
+- redaction and findings reported by `/v1/response/scan`
+
+## Verified HTTP Flow
 
 ```bash
-# List demo scenarios
-curl http://localhost:4010/v1/demo/scenarios \
-  -H "Authorization: Bearer <key>"
+# Health
+curl http://localhost:4010/health
 
-# Run all scenarios
-curl -X POST http://localhost:4010/v1/demo/run-adapter \
-  -H "Authorization: Bearer <key>"
-
-# Inspect a custom payload
+# Inspect
 curl -X POST http://localhost:4010/v1/inspect \
   -H "Authorization: Bearer <key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "agentId": "my-agent",
+    "agentId": "openclaw-builder-01",
     "workspaceId": "ws-demo",
-    "framework": "langchain",
+    "framework": "openclaw",
     "protocol": "mcp",
     "action": {
-      "type": "shell",
-      "toolName": "terminal.exec",
-      "payload": {"command": "ls -la"}
+      "type": "file_read",
+      "toolName": "filesystem.read",
+      "payload": {
+        "path": "README.md",
+        "intent": "read docs"
+      }
     }
   }'
+
+# Response scan
+curl -X POST http://localhost:4010/v1/response/scan \
+  -H "Authorization: Bearer <key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "requestId": "scan-demo-1",
+    "agentId": "openclaw-builder-01",
+    "toolName": "terminal.exec",
+    "responsePayload": {
+      "secret": "AKIA1234567890ABCDEF"
+    }
+  }'
+
+# Audit export
+curl "http://localhost:4010/v1/audit/export?format=csv" \
+  -H "Authorization: Bearer <key>"
 ```
 
-## Dashboard Features
+## What To Observe
 
-The embedded dashboard provides real-time visualization of all 8 security layers:
+- `x-request-id` is returned on HTTP responses
+- `traceId` is returned in governance responses
+- audit entries appear after inspect calls
+- CSV export includes the newly generated audit rows
 
-- Layer status indicators with live/demo mode detection
-- Session graph with FSA state tracking
-- Adaptive risk weight sliders
-- Sandbox pending queue with approve/reject
-- Firewall 3-stage catch rate metrics
-- Policy formal verification results
-- OpenTelemetry span viewer
-- Audit trail with filtering
-- SSE real-time event feed
+## Dashboard Note
+
+The dashboard is now connected to live runtime data.
+
+If the runtime is protected, paste a valid API key into the dashboard to load the protected endpoints.

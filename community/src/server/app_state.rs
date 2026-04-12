@@ -13,10 +13,12 @@ pub struct AppState {
     pub review_store: Arc<dyn ReviewStore>,
     pub policy_store: Arc<dyn PolicyStore>,
     pub api_key_store: Arc<dyn ApiKeyStore>,
+    pub tenant_store: Arc<dyn TenantStore>,
     pub event_bus: EventBus,
     pub webhook_manager: Arc<WebhookManager>,
     pub behavioral_engine: Arc<BehavioralEngine>,
     pub rate_limiter: Arc<RateLimiter>,
     pub threat_feed: Arc<ThreatFeed>,
+    pub storage_backend: StorageBackend,
     pub env: AppEnv,
 }

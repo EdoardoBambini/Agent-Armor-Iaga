@@ -1,6 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// ── Tenant ──
+
+/// A tenant owns multiple workspaces. All data is scoped to a tenant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tenant {
+    pub tenant_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub enabled: bool,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
+}
+
 // ── Enums ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +79,8 @@ pub enum ReviewAction {
 pub struct InspectRequest {
     pub agent_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     pub framework: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,6 +116,8 @@ pub struct RiskScore {
 #[serde(rename_all = "camelCase")]
 pub struct AgentProfile {
     pub agent_id: String,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
     pub workspace_id: String,
     pub framework: String,
     pub role: AgentRole,
@@ -128,6 +147,8 @@ pub struct ToolPolicy {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspacePolicy {
     pub workspace_id: String,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
     pub allowed_protocols: Vec<ProtocolKind>,
     pub tools: Vec<ToolPolicy>,
     pub allowed_domains: Vec<String>,
@@ -183,6 +204,7 @@ pub struct SchemaValidation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GovernanceResult {
+    pub trace_id: String,
     pub protocol: ProtocolKind,
     pub normalized_payload: HashMap<String, serde_json::Value>,
     pub decision: GovernanceDecision,
@@ -241,6 +263,8 @@ pub struct ReviewRequest {
 pub struct StoredAuditEvent {
     pub event_id: String,
     pub agent_id: String,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
     pub framework: String,
     pub action_type: ActionType,
     pub tool_name: String,
@@ -344,6 +368,7 @@ pub struct ArmorConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditExportFilter {
+    pub tenant_id: Option<String>,
     pub agent_id: Option<String>,
     pub decision: Option<String>,
     pub from_date: Option<String>,

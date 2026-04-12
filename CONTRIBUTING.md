@@ -53,7 +53,7 @@ cargo fmt                     # Format code
 ### What We're Looking For
 
 - **New detection rules** — Pattern matching for risky agent behaviors
-- **Protocol parsers** — ACP support, new agent framework adapters
+- **Protocol parsers** — New agent framework adapters and protocol hardening
 - **Policy templates** — Pre-built policy sets for common use cases
 - **SDK improvements** — Python and TypeScript client SDK features
 - **Documentation** — Tutorials, examples, translations

@@ -57,6 +57,22 @@ pub trait ApiKeyStore: Send + Sync {
     async fn list_keys(&self) -> Result<Vec<ApiKeyRecord>, ArmorError>;
 }
 
+/// Tenant management store (enterprise multi-tenancy support).
+#[async_trait]
+pub trait TenantStore: Send + Sync {
+    async fn create_tenant(&self, tenant: &Tenant) -> Result<(), ArmorError>;
+    async fn get_tenant(&self, tenant_id: &str) -> Result<Tenant, ArmorError>;
+    async fn list_tenants(&self) -> Result<Vec<Tenant>, ArmorError>;
+    async fn delete_tenant(&self, tenant_id: &str) -> Result<(), ArmorError>;
+}
+
+/// Describes which database backend is in use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageBackend {
+    Sqlite,
+    Postgres,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiKeyRecord {

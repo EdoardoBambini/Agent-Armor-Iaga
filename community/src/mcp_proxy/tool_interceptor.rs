@@ -37,6 +37,7 @@ pub async fn intercept_tool_call(
 
     let request = InspectRequest {
         agent_id: agent_id.to_string(),
+        tenant_id: None,
         workspace_id: None,
         framework: "mcp".to_string(),
         protocol: Some(ProtocolKind::Mcp),

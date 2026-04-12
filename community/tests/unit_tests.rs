@@ -10,6 +10,9 @@ use agent_armor::modules::injection_firewall::prompt_firewall::{
 use agent_armor::modules::nhi::crypto_identity;
 use agent_armor::modules::policy::evaluate_policy::evaluate_policy;
 use agent_armor::modules::protocol::detect_protocol::detect_protocol;
+use agent_armor::modules::protocol::protocol_envelope::{
+    normalize_protocol_payload, validate_protocol_payload,
+};
 use agent_armor::modules::risk::adaptive_scorer::{
     apply_feedback, calculate_adaptive_risk, get_current_weights, update_baseline,
     AdaptiveScoreInput,
@@ -253,6 +256,32 @@ fn test_taint_classify_source_http_internal() {
     assert!(
         labels.contains(&INTERNAL_API.to_string()),
         "localhost http should produce internal_api taint"
+    );
+}
+
+#[test]
+fn test_taint_http_task_id_is_not_secret() {
+    let labels = classify_source(
+        "http",
+        "a2a.message.send",
+        r#"{"taskId":"task-123","message":{"parts":[{"text":"hello"}]}}"#,
+    );
+    assert!(
+        !labels.contains(&SECRET.to_string()),
+        "task identifiers should not be misclassified as secret content"
+    );
+}
+
+#[test]
+fn test_taint_http_openai_key_is_secret() {
+    let labels = classify_source(
+        "http",
+        "fetch",
+        "Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz123456",
+    );
+    assert!(
+        labels.contains(&SECRET.to_string()),
+        "OpenAI-style keys should still be classified as secret content"
     );
 }
 
@@ -553,6 +582,7 @@ fn make_request(
 ) -> InspectRequest {
     InspectRequest {
         agent_id: "agent-policy-test".to_string(),
+        tenant_id: None,
         workspace_id: Some("ws-test".to_string()),
         framework: "test-framework".to_string(),
         protocol: Some(ProtocolKind::Mcp),
@@ -573,6 +603,7 @@ fn make_profile(
 ) -> AgentProfile {
     AgentProfile {
         agent_id: agent_id.to_string(),
+        tenant_id: None,
         workspace_id: "ws-test".to_string(),
         framework: "test-framework".to_string(),
         role: AgentRole::Builder,
@@ -590,6 +621,7 @@ fn make_workspace_policy(
 ) -> WorkspacePolicy {
     WorkspacePolicy {
         workspace_id: "ws-test".to_string(),
+        tenant_id: None,
         allowed_protocols,
         tools,
         allowed_domains: allowed_domains.into_iter().map(|s| s.to_string()).collect(),
@@ -1215,6 +1247,7 @@ fn test_detect_protocol_explicit_mcp() {
 fn test_detect_protocol_mcp_by_tool_name() {
     let req = InspectRequest {
         agent_id: "test-agent".into(),
+        tenant_id: None,
         workspace_id: None,
         framework: "langchain".into(),
         protocol: None,
@@ -1235,6 +1268,7 @@ fn test_detect_protocol_a2a_by_payload() {
     payload.insert("taskId".into(), serde_json::json!("task-123"));
     let req = InspectRequest {
         agent_id: "test-agent".into(),
+        tenant_id: None,
         workspace_id: None,
         framework: "custom".into(),
         protocol: None,
@@ -1250,9 +1284,207 @@ fn test_detect_protocol_a2a_by_payload() {
 }
 
 #[test]
+fn test_detect_protocol_a2a_by_jsonrpc_method() {
+    let req = InspectRequest {
+        agent_id: "test-agent".into(),
+        tenant_id: None,
+        workspace_id: None,
+        framework: "custom".into(),
+        protocol: None,
+        action: ActionDetail {
+            action_type: ActionType::Http,
+            tool_name: "agent-dispatch".into(),
+            payload: HashMap::from([
+                ("jsonrpc".into(), serde_json::json!("2.0")),
+                ("method".into(), serde_json::json!("SendMessage")),
+                (
+                    "params".into(),
+                    serde_json::json!({
+                        "message": {
+                            "role": "ROLE_USER",
+                            "parts": [{ "text": "hello" }]
+                        }
+                    }),
+                ),
+            ]),
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+
+    assert_eq!(detect_protocol(&req), ProtocolKind::A2a);
+}
+
+#[test]
+fn test_detect_protocol_acp_by_run_shape() {
+    let req = InspectRequest {
+        agent_id: "test-agent".into(),
+        tenant_id: None,
+        workspace_id: None,
+        framework: "custom".into(),
+        protocol: None,
+        action: ActionDetail {
+            action_type: ActionType::Http,
+            tool_name: "run.create".into(),
+            payload: HashMap::from([
+                ("agent_name".into(), serde_json::json!("planner")),
+                (
+                    "input".into(),
+                    serde_json::json!([
+                        {
+                            "role": "user",
+                            "parts": [{ "content_type": "text/plain", "content": "hello" }]
+                        }
+                    ]),
+                ),
+            ]),
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+
+    assert_eq!(detect_protocol(&req), ProtocolKind::Acp);
+}
+
+#[test]
+fn test_validate_a2a_payload_and_normalize_message_text() {
+    let request = InspectRequest {
+        agent_id: "test-agent".into(),
+        tenant_id: None,
+        workspace_id: None,
+        framework: "a2a".into(),
+        protocol: Some(ProtocolKind::A2a),
+        action: ActionDetail {
+            action_type: ActionType::Http,
+            tool_name: "a2a.message.send".into(),
+            payload: HashMap::from([
+                ("jsonrpc".into(), serde_json::json!("2.0")),
+                ("method".into(), serde_json::json!("SendMessage")),
+                (
+                    "params".into(),
+                    serde_json::json!({
+                        "message": {
+                            "messageId": "msg-1",
+                            "taskId": "task-1",
+                            "role": "ROLE_USER",
+                            "parts": [{ "text": "hello from a2a" }]
+                        }
+                    }),
+                ),
+            ]),
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+
+    let validation = validate_protocol_payload(&request, ProtocolKind::A2a);
+    assert!(
+        validation.valid,
+        "A2A payload should validate: {:?}",
+        validation.findings
+    );
+
+    let normalized = normalize_protocol_payload(&request, ProtocolKind::A2a);
+    assert_eq!(
+        normalized.get("method"),
+        Some(&serde_json::json!("SendMessage"))
+    );
+    assert_eq!(
+        normalized.get("messageText"),
+        Some(&serde_json::json!("hello from a2a"))
+    );
+    assert_eq!(normalized.get("partCount"), Some(&serde_json::json!(1)));
+}
+
+#[test]
+fn test_validate_acp_run_payload() {
+    let request = InspectRequest {
+        agent_id: "test-agent".into(),
+        tenant_id: None,
+        workspace_id: None,
+        framework: "acp".into(),
+        protocol: Some(ProtocolKind::Acp),
+        action: ActionDetail {
+            action_type: ActionType::Http,
+            tool_name: "acp.run.create".into(),
+            payload: HashMap::from([
+                ("agent_name".into(), serde_json::json!("planner")),
+                ("mode".into(), serde_json::json!("sync")),
+                (
+                    "session_id".into(),
+                    serde_json::json!("123e4567-e89b-12d3-a456-426614174000"),
+                ),
+                (
+                    "input".into(),
+                    serde_json::json!([
+                        {
+                            "role": "user",
+                            "parts": [{ "content_type": "text/plain", "content": "hello" }]
+                        }
+                    ]),
+                ),
+            ]),
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+
+    let validation = validate_protocol_payload(&request, ProtocolKind::Acp);
+    assert!(
+        validation.valid,
+        "ACP payload should validate: {:?}",
+        validation.findings
+    );
+
+    let normalized = normalize_protocol_payload(&request, ProtocolKind::Acp);
+    assert_eq!(
+        normalized.get("agentName"),
+        Some(&serde_json::json!("planner"))
+    );
+    assert_eq!(normalized.get("messageCount"), Some(&serde_json::json!(1)));
+    assert_eq!(normalized.get("partCount"), Some(&serde_json::json!(1)));
+}
+
+#[test]
+fn test_validate_acp_rejects_invalid_part_shape() {
+    let request = InspectRequest {
+        agent_id: "test-agent".into(),
+        tenant_id: None,
+        workspace_id: None,
+        framework: "acp".into(),
+        protocol: Some(ProtocolKind::Acp),
+        action: ActionDetail {
+            action_type: ActionType::Http,
+            tool_name: "acp.run.create".into(),
+            payload: HashMap::from([
+                ("agent_name".into(), serde_json::json!("planner")),
+                (
+                    "input".into(),
+                    serde_json::json!([
+                        {
+                            "role": "user",
+                            "parts": [{ "content_type": "text/plain" }]
+                        }
+                    ]),
+                ),
+            ]),
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+
+    let validation = validate_protocol_payload(&request, ProtocolKind::Acp);
+    assert!(
+        !validation.valid,
+        "ACP payload should be rejected without content or content_url"
+    );
+}
+
+#[test]
 fn test_detect_protocol_http_function_fallback() {
     let req = InspectRequest {
         agent_id: "test-agent".into(),
+        tenant_id: None,
         workspace_id: None,
         framework: "langchain".into(),
         protocol: None,
@@ -1271,6 +1503,7 @@ fn test_detect_protocol_http_function_fallback() {
 fn test_detect_protocol_unknown_empty_framework() {
     let req = InspectRequest {
         agent_id: "test-agent".into(),
+        tenant_id: None,
         workspace_id: None,
         framework: "".into(),
         protocol: None,

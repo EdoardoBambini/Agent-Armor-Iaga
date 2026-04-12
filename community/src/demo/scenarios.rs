@@ -6,6 +6,7 @@ pub fn demo_profiles() -> Vec<AgentProfile> {
     vec![
         AgentProfile {
             agent_id: "openclaw-builder-01".into(),
+            tenant_id: None,
             workspace_id: "ws-demo".into(),
             framework: "openclaw".into(),
             role: AgentRole::Builder,
@@ -23,6 +24,7 @@ pub fn demo_profiles() -> Vec<AgentProfile> {
         },
         AgentProfile {
             agent_id: "openclaw-research-01".into(),
+            tenant_id: None,
             workspace_id: "ws-demo".into(),
             framework: "openclaw".into(),
             role: AgentRole::Researcher,
@@ -37,6 +39,7 @@ pub fn demo_profiles() -> Vec<AgentProfile> {
 pub fn demo_workspace_policies() -> Vec<WorkspacePolicy> {
     vec![WorkspacePolicy {
         workspace_id: "ws-demo".into(),
+        tenant_id: None,
         allowed_protocols: vec![ProtocolKind::Mcp, ProtocolKind::HttpFunction],
         allowed_domains: vec!["api.github.com".into(), "hooks.slack.com".into()],
         tools: vec![
@@ -78,6 +81,7 @@ pub fn demo_scenarios() -> Vec<DemoScenario> {
             title: "Safe MCP-aligned repository inspection".into(),
             request: InspectRequest {
                 agent_id: "openclaw-builder-01".into(),
+                tenant_id: None,
                 workspace_id: Some("ws-demo".into()),
                 framework: "openclaw".into(),
                 protocol: Some(ProtocolKind::Mcp),
@@ -101,6 +105,7 @@ pub fn demo_scenarios() -> Vec<DemoScenario> {
             title: "Controlled shell execution with secret injection".into(),
             request: InspectRequest {
                 agent_id: "openclaw-builder-01".into(),
+                tenant_id: None,
                 workspace_id: Some("ws-demo".into()),
                 framework: "openclaw".into(),
                 protocol: Some(ProtocolKind::Mcp),
@@ -125,6 +130,7 @@ pub fn demo_scenarios() -> Vec<DemoScenario> {
             title: "Destructive shell command blocked".into(),
             request: InspectRequest {
                 agent_id: "openclaw-builder-01".into(),
+                tenant_id: None,
                 workspace_id: Some("ws-demo".into()),
                 framework: "openclaw".into(),
                 protocol: Some(ProtocolKind::Mcp),
@@ -148,6 +154,7 @@ pub fn demo_scenarios() -> Vec<DemoScenario> {
             title: "Unknown secret reference denied".into(),
             request: InspectRequest {
                 agent_id: "openclaw-research-01".into(),
+                tenant_id: None,
                 workspace_id: Some("ws-demo".into()),
                 framework: "openclaw".into(),
                 protocol: Some(ProtocolKind::Mcp),

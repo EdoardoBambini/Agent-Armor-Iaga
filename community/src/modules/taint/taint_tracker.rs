@@ -202,11 +202,15 @@ fn has_secret_content(text: &str) -> bool {
         "secretref://",
         "bearer ",
         "ghp_",
-        "sk-",
         "aws_secret",
         "password",
     ];
-    patterns.iter().any(|p| lower.contains(p))
+    patterns.iter().any(|p| lower.contains(p)) || contains_openai_like_key(&lower)
+}
+
+fn contains_openai_like_key(text: &str) -> bool {
+    text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+        .any(|token| token.starts_with("sk-") && token.len() >= 20)
 }
 
 fn is_internal_url(text: &str) -> bool {

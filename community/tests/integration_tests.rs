@@ -13,7 +13,7 @@ use agent_armor::modules::threat_intel::feed::ThreatFeed;
 use agent_armor::pipeline::execute_pipeline::execute_pipeline;
 use agent_armor::server::app_state::AppState;
 use agent_armor::storage::sqlite::SqliteStorage;
-use agent_armor::storage::traits::PolicyStore;
+use agent_armor::storage::traits::{PolicyStore, StorageBackend};
 
 /// Build a fully-wired AppState backed by an in-memory SQLite database,
 /// with demo profiles and workspace policies seeded.
@@ -53,12 +53,14 @@ async fn build_test_state() -> Arc<AppState> {
         audit_store: storage.clone(),
         review_store: storage.clone(),
         policy_store: storage.clone(),
-        api_key_store: storage,
+        api_key_store: storage.clone(),
+        tenant_store: storage.clone(),
         event_bus,
         webhook_manager,
         behavioral_engine: Arc::new(BehavioralEngine::new()),
         rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
         threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
+        storage_backend: StorageBackend::Sqlite,
         env,
     })
 }
@@ -80,6 +82,7 @@ async fn test_safe_file_read_is_allowed() {
 
     let request = InspectRequest {
         agent_id: "openclaw-builder-01".into(),
+        tenant_id: None,
         workspace_id: Some("ws-demo".into()),
         framework: "openclaw".into(),
         protocol: Some(ProtocolKind::Mcp),
@@ -106,6 +109,10 @@ async fn test_safe_file_read_is_allowed() {
         result.decision,
         result.policy_findings
     );
+    assert!(
+        !result.trace_id.is_empty(),
+        "governance result should include a trace_id"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,6 +125,7 @@ async fn test_shell_with_env_secret_triggers_review_or_block() {
 
     let request = InspectRequest {
         agent_id: "openclaw-builder-01".into(),
+        tenant_id: None,
         workspace_id: Some("ws-demo".into()),
         framework: "openclaw".into(),
         protocol: Some(ProtocolKind::Mcp),
@@ -156,6 +164,7 @@ async fn test_destructive_command_is_blocked() {
 
     let request = InspectRequest {
         agent_id: "openclaw-builder-01".into(),
+        tenant_id: None,
         workspace_id: Some("ws-demo".into()),
         framework: "openclaw".into(),
         protocol: Some(ProtocolKind::Mcp),
@@ -194,6 +203,7 @@ async fn test_unknown_secret_triggers_review() {
 
     let request = InspectRequest {
         agent_id: "openclaw-research-01".into(),
+        tenant_id: None,
         workspace_id: Some("ws-demo".into()),
         framework: "openclaw".into(),
         protocol: Some(ProtocolKind::Mcp),
@@ -258,4 +268,180 @@ async fn test_all_demo_scenarios_execute_successfully() {
             result.err()
         );
     }
+}
+
+#[tokio::test]
+async fn test_a2a_payload_flows_through_pipeline() {
+    let state = build_test_state().await;
+
+    state
+        .policy_store
+        .upsert_profile(&AgentProfile {
+            agent_id: "a2a-agent".into(),
+            tenant_id: None,
+            workspace_id: "ws-a2a".into(),
+            framework: "a2a".into(),
+            role: AgentRole::Builder,
+            approved_tools: vec!["a2a.message.send".into()],
+            approved_secrets: vec![],
+            baseline_action_types: vec![ActionType::Http],
+            tool_trust: 0.7,
+        })
+        .await
+        .expect("failed to seed a2a profile");
+
+    state
+        .policy_store
+        .upsert_workspace(&WorkspacePolicy {
+            workspace_id: "ws-a2a".into(),
+            tenant_id: None,
+            allowed_protocols: vec![ProtocolKind::A2a],
+            tools: vec![ToolPolicy {
+                tool_name: "a2a.message.send".into(),
+                allowed_action_types: vec![ActionType::Http],
+                max_decision: GovernanceDecision::Allow,
+                requires_human_review: false,
+            }],
+            allowed_domains: vec![],
+            threshold_block: 70,
+            threshold_review: 35,
+        })
+        .await
+        .expect("failed to seed a2a workspace");
+
+    let request = InspectRequest {
+        agent_id: "a2a-agent".into(),
+        tenant_id: None,
+        workspace_id: Some("ws-a2a".into()),
+        framework: "a2a".into(),
+        protocol: None,
+        action: ActionDetail {
+            action_type: ActionType::Http,
+            tool_name: "a2a.message.send".into(),
+            payload: payload(&[
+                ("jsonrpc", serde_json::json!("2.0")),
+                ("method", serde_json::json!("SendMessage")),
+                (
+                    "params",
+                    serde_json::json!({
+                        "message": {
+                            "messageId": "msg-1",
+                            "taskId": "task-123",
+                            "role": "ROLE_USER",
+                            "parts": [{ "text": "hello from a2a" }]
+                        }
+                    }),
+                ),
+            ]),
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+
+    let result = execute_pipeline(&request, &state)
+        .await
+        .expect("A2A pipeline should succeed");
+
+    assert_eq!(result.protocol, ProtocolKind::A2a);
+    assert!(result.schema_validation.valid, "A2A schema should be valid");
+    assert_eq!(
+        result.decision,
+        GovernanceDecision::Allow,
+        "A2A request should be allowed, got {:?} with findings: {:?}",
+        result.decision,
+        result.policy_findings
+    );
+    assert_eq!(
+        result.normalized_payload.get("messageText"),
+        Some(&serde_json::json!("hello from a2a"))
+    );
+}
+
+#[tokio::test]
+async fn test_acp_payload_flows_through_pipeline() {
+    let state = build_test_state().await;
+
+    state
+        .policy_store
+        .upsert_profile(&AgentProfile {
+            agent_id: "acp-agent".into(),
+            tenant_id: None,
+            workspace_id: "ws-acp".into(),
+            framework: "acp".into(),
+            role: AgentRole::Builder,
+            approved_tools: vec!["acp.run.create".into()],
+            approved_secrets: vec![],
+            baseline_action_types: vec![ActionType::Http],
+            tool_trust: 0.7,
+        })
+        .await
+        .expect("failed to seed acp profile");
+
+    state
+        .policy_store
+        .upsert_workspace(&WorkspacePolicy {
+            workspace_id: "ws-acp".into(),
+            tenant_id: None,
+            allowed_protocols: vec![ProtocolKind::Acp],
+            tools: vec![ToolPolicy {
+                tool_name: "acp.run.create".into(),
+                allowed_action_types: vec![ActionType::Http],
+                max_decision: GovernanceDecision::Allow,
+                requires_human_review: false,
+            }],
+            allowed_domains: vec![],
+            threshold_block: 70,
+            threshold_review: 35,
+        })
+        .await
+        .expect("failed to seed acp workspace");
+
+    let request = InspectRequest {
+        agent_id: "acp-agent".into(),
+        tenant_id: None,
+        workspace_id: Some("ws-acp".into()),
+        framework: "acp".into(),
+        protocol: None,
+        action: ActionDetail {
+            action_type: ActionType::Http,
+            tool_name: "acp.run.create".into(),
+            payload: payload(&[
+                ("agent_name", serde_json::json!("planner")),
+                ("mode", serde_json::json!("sync")),
+                (
+                    "session_id",
+                    serde_json::json!("123e4567-e89b-12d3-a456-426614174000"),
+                ),
+                (
+                    "input",
+                    serde_json::json!([
+                        {
+                            "role": "user",
+                            "parts": [{ "content_type": "text/plain", "content": "hello from acp" }]
+                        }
+                    ]),
+                ),
+            ]),
+        },
+        requested_secrets: None,
+        metadata: None,
+    };
+
+    let result = execute_pipeline(&request, &state)
+        .await
+        .expect("ACP pipeline should succeed");
+
+    assert_eq!(result.protocol, ProtocolKind::Acp);
+    assert!(result.schema_validation.valid, "ACP schema should be valid");
+    assert_eq!(
+        result.decision,
+        GovernanceDecision::Allow,
+        "ACP request should be allowed, got {:?} with findings: {:?}",
+        result.decision,
+        result.policy_findings
+    );
+    assert_eq!(
+        result.normalized_payload.get("agentName"),
+        Some(&serde_json::json!("planner"))
+    );
 }

@@ -1,160 +1,169 @@
 # Architecture
 
-## 8-Layer Security Pipeline
+## Release Context
 
-Every agent request passes through all 8 layers in sequence:
+This document describes the current community architecture for `v0.3.0`.
 
-```
-Request → DPI → Taint → NHI → Risk → Sandbox → Policy → Firewall → Telemetry → Decision
-```
+It reflects the code that is actually present in `community/`, including:
 
-### Layer 1: Protocol Deep Packet Inspection
-- Detects MCP, ACP, and HTTP function call protocols
-- Parses and normalizes action envelopes
-- Validates tool calls against registered MCP schemas
+- SQLite and optional PostgreSQL storage
+- versioned migrations
+- structured logging and correlation IDs
+- live HTTP E2E verification
 
-### Layer 2: Taint Tracking
-- Tracks data provenance through agent execution chains
-- Labels data with taint markers (credential, PII, internal)
-- Detects exfiltration when tainted data flows to external sinks
+## 8-Layer Governance Pipeline
 
-### Layer 3: Non-Human Identity Registry
-- Every agent gets a cryptographic identity (HMAC-SHA256)
-- Key pair generation and storage
-- Real challenge-response attestation: server issues nonce, agent signs with HMAC-SHA256, server verifies
-- Challenge TTL (60s) with automatic pruning of expired challenges
-- Backwards-compatible simulated attestation for agents that haven't upgraded
+Every governed action flows through the same ordered pipeline:
 
-### Layer 4: Adaptive Risk Scoring
-- 5-weight model: statistical, contextual, behavioral, temporal, reputation
-- Weights are adjustable per deployment
-- Produces a 0-100 risk score that drives the governance decision
-- Configurable thresholds per workspace (threshold_block, threshold_review) — different environments can have different risk tolerances
-
-### Layer 5: Sandbox Execution
-- Isolates tool execution in a controlled environment
-- Captures network calls, DB operations, and filesystem changes
-- Requires human approval for high-impact operations
-
-### Layer 6: Policy Engine
-- Formal verification of workspace policies
-- Checks consistency (no contradictions), completeness (no gaps), satisfiability
-- Reports coverage percentage and specific issues
-
-### Layer 7: Injection Firewall
-- 3-stage defense: pattern matching → entropy analysis → structural validation
-- Catches prompt injection, jailbreaks, and indirect prompt attacks
-- Reports per-stage catch rates and false positive tracking
-
-### Layer 8: Observability
-- OpenTelemetry-compatible span emission
-- Real-time SSE event stream for dashboards
-- HMAC-signed webhook delivery to external systems
-- Dead letter queue (DLQ) for failed webhook deliveries with manual retry
-
-## Advanced Modules (Tier 2)
-
-These modules extend the core pipeline with production-hardening capabilities.
-
-### Response Scanning
-- Scans agent output for sensitive data before delivery
-- Pattern-based detection of PII, credentials, API keys, internal paths
-- Built-in patterns for common secret formats (AWS keys, JWTs, database URIs, etc.)
-- Integrated into the pipeline as a post-decision output filter
-
-### Rate Limiting
-- Per-agent sliding window rate limiter
-- Configurable requests-per-second, burst allowances, and cooldown periods
-- Tracks quota consumption per agent ID
-- Returns remaining quota and reset timestamps in status responses
-- Enforced as a pre-pipeline check to reject requests before they consume compute
-
-### Agent Fingerprinting
-- Builds behavioral profiles from agent tool usage patterns
-- Tracks action type distribution, timing cadence, and tool preference sequences
-- Detects anomalous behavior that deviates from an agent's established baseline
-- Fingerprints are stored in-memory and queryable per agent
-- Integrated with the risk scoring layer to elevate scores for anomalous agents
-
-### Threat Intelligence
-- Maintains a local indicator-of-compromise (IOC) database
-- Supports indicator types: IP addresses, domains, file hashes, URLs, custom patterns
-- Check endpoint evaluates agent action payloads against known indicators
-- Statistics endpoint reports match counts and indicator coverage
-- Indicators can be added, listed, and removed via the REST API
-
-## Operational Features (v0.2.0)
-
-### Audit Export & Compliance
-- JSON and CSV export of the full audit trail with filtering (agent_id, date range, decision type)
-- Aggregate statistics: decision breakdown, top agents, top tools
-- Designed for SIEM ingestion and compliance reporting
-
-### Agent Analytics
-- Per-agent operational visibility: total requests, decision breakdown, average risk score
-- Top tools used, last activity timestamp, trust score
-- Summary endpoint for all agents + detail endpoint per agent
-
-### Webhook Dead Letter Queue
-- Failed webhook deliveries (after exponential backoff retries) are stored in a DLQ
-- List, retry, and delete DLQ entries via REST API
-- Prevents silent data loss from transient webhook failures
-
-## Deployment Modes
-
-### Gateway Mode (default)
-
-All agent traffic routes through Agent Armor as a central gateway:
-
-```
-Agent → Agent Armor Gateway → Tool
+```text
+Request
+  -> Protocol DPI
+  -> Taint Tracking
+  -> NHI Identity
+  -> Adaptive Risk
+  -> Sandbox / Impact
+  -> Policy Evaluation
+  -> Injection Firewall
+  -> Telemetry
+  -> Decision
 ```
 
-Best for: multi-agent environments, centralized policy management.
+## Layer Summary
 
-### Sidecar Mode
+### Layer 1 - Protocol DPI
 
-Agent Armor runs alongside each agent as a local process:
+- detects MCP, ACP, A2A, and HTTP-style envelopes
+- normalizes and validates MCP, ACP, and A2A request shapes before policy evaluation
 
-```
-Agent ↔ Agent Armor Sidecar → Tool
-```
+### Layer 2 - Taint Tracking
 
-Best for: Kubernetes, containerized agents, tight local enforcement.
+- labels data as it moves through tool actions
+- detects exfiltration and unsafe sink usage
+- still keeps runtime session state in memory today
 
-## Tech Stack
+### Layer 3 - NHI Registry
 
-- **Runtime**: Rust + Tokio async runtime
-- **HTTP**: Axum 0.8 with Tower middleware
-- **Storage**: SQLite via sqlx (async)
-- **Auth**: Argon2 password hashing, Bearer token middleware
-- **Crypto**: HMAC-SHA256 for NHI identity attestation
-- **Events**: Tokio broadcast channels → SSE + webhooks
-- **Config**: JSON + YAML support via serde
+- creates non-human identities for agents
+- supports challenge-response attestation
+- still uses in-memory runtime state today
 
-## Module Boundaries
+### Layer 4 - Adaptive Risk
 
-```
+- combines multiple signals into a 0-100 score
+- honors per-workspace `thresholdReview` and `thresholdBlock`
+
+### Layer 5 - Sandbox / Impact Analysis
+
+- estimates impact for risky actions
+- supports approval/rejection flows for pending sandboxed actions
+
+### Layer 6 - Policy Engine
+
+- checks profiles, workspaces, tool rules, protocols, and destinations
+- supports formal verification of workspace policies
+
+### Layer 7 - Injection Firewall
+
+- uses staged rule-based prompt inspection
+- tracks runtime stats in memory today
+- no ML classifier in community `0.3.0`
+
+### Layer 8 - Telemetry
+
+- emits spans and metrics
+- supports SSE and webhook fan-out
+- logs request-level correlation via `x-request-id`
+- returns pipeline-level `traceId` in governance responses
+
+## Storage
+
+### Backends
+
+- default: SQLite
+- optional: PostgreSQL via `--features postgres`
+
+The runtime selects the backend from `DATABASE_URL`:
+
+- `sqlite:...` -> SQLite
+- `postgres://...` or `postgresql://...` -> PostgreSQL
+
+### Migrations
+
+Schema migrations are versioned under:
+
+- `community/migrations/sqlite/`
+- `community/migrations/postgres/`
+
+The runtime runs them through `sqlx::migrate!()`.
+
+There is also a small compatibility layer that backfills columns needed by older community databases.
+
+## Runtime Surface
+
+```text
 community/src/
-├── server/          → HTTP ingress, routing, auth
-├── pipeline/        → Orchestration only (calls each layer)
-├── modules/
-│   ├── protocol/    → Layer 1: DPI
-│   ├── taint/       → Layer 2: Taint tracking
-│   ├── nhi/         → Layer 3: Identity
-│   ├── risk/        → Layer 4: Scoring
-│   ├── sandbox/     → Layer 5: Isolation
-│   ├── policy/      → Layer 6: Verification
-│   ├── injection_firewall/ → Layer 7: Firewall
-│   ├── telemetry/   → Layer 8: Observability
-│   ├── audit/       → Cross-cutting: audit trail
-│   ├── review/      → Cross-cutting: human review queue
-│   ├── secrets/     → Cross-cutting: secret references
-│   ├── session_graph/ → Cross-cutting: session DAG
-│   ├── rate_limit/  → Tier 2: per-agent rate limiting
-│   ├── fingerprint/ → Tier 2: behavioral agent fingerprinting
-│   └── threat_intel/ → Tier 2: threat intelligence feed
-├── events/          → Event bus, SSE, webhooks
-├── storage/         → Persistence traits + SQLite impl
-└── auth/            → API key management + middleware
+|- main.rs
+|- core/
+|- auth/
+|- config/
+|- dashboard/
+|- events/
+|- modules/
+|- mcp_proxy/
+|- pipeline/
+|- server/
+`- storage/
+   |- traits.rs
+   |- migrations.rs
+   |- sqlite.rs
+   `- postgres.rs
 ```
+
+## Transport And API
+
+- HTTP server: Axum
+- auth: Bearer token with Argon2-hashed API keys
+- public routes: `/`, `/health`
+- protected routes: `/v1/*`
+- real-time transport: SSE and webhooks
+- MCP support today: proxy/interceptor mode and MCP server mode over stdio
+
+## Logging And Correlation
+
+`v0.3.0` adds:
+
+- `AGENT_ARMOR_LOG_FORMAT=pretty|compact|json`
+- `AGENT_ARMOR_LOG_LEVEL`
+- `RUST_LOG` fallback
+- `x-request-id` on HTTP responses
+- `traceId` on governance results
+
+This makes server logs, API responses, and audit/review flows easier to correlate.
+
+## Verification Strategy
+
+The community runtime is verified with:
+
+- unit tests
+- property tests
+- direct integration tests
+- live HTTP E2E tests that start the server and issue real requests
+
+## Known Architectural Gaps
+
+These are the main remaining community architecture gaps:
+
+- framework adapters
+- moving remaining in-memory runtime stores behind storage traits
+
+## Dashboard
+
+The dashboard is now a live operator console served from the Rust runtime.
+
+Current connected surfaces include:
+
+- live overview metrics
+- audit exploration
+- review queue actions
+- selected-agent analytics and fingerprint drill-down
+- runtime posture cards for firewall, threat intel, telemetry, rate limiting, sessions, and policy verification

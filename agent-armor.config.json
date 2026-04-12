@@ -1,51 +1,32 @@
 {
   "profiles": [
     {
-      "agentId": "openclaw-builder-01",
-      "workspaceId": "ws-demo",
-      "framework": "openclaw",
+      "agentId": "my-agent",
+      "workspaceId": "ws-prod",
+      "framework": "langchain",
       "role": "builder",
-      "approvedTools": ["filesystem.read", "http.fetch", "terminal.exec"],
-      "approvedSecrets": ["secretref://prod/github/token", "secretref://prod/slack/webhook"],
-      "baselineActionTypes": ["file_read", "http", "shell"]
-    },
-    {
-      "agentId": "openclaw-research-01",
-      "workspaceId": "ws-demo",
-      "framework": "openclaw",
-      "role": "researcher",
       "approvedTools": ["filesystem.read", "http.fetch"],
-      "approvedSecrets": [],
-      "baselineActionTypes": ["http"]
+      "approvedSecrets": ["secretref://prod/api/key"],
+      "baselineActionTypes": ["file_read", "http"]
     }
   ],
   "workspaces": [
     {
-      "workspaceId": "ws-demo",
-      "allowedProtocols": ["mcp", "http-function"],
-      "allowedDomains": ["api.github.com", "hooks.slack.com"],
+      "workspaceId": "ws-prod",
+      "allowedProtocols": ["mcp"],
+      "allowedDomains": ["api.github.com"],
       "tools": [
         {
           "toolName": "filesystem.read",
           "allowedActionTypes": ["file_read"],
           "maxDecision": "allow"
-        },
-        {
-          "toolName": "http.fetch",
-          "allowedActionTypes": ["http"],
-          "maxDecision": "allow"
-        },
-        {
-          "toolName": "terminal.exec",
-          "allowedActionTypes": ["shell"],
-          "maxDecision": "review",
-          "requiresHumanReview": true
         }
-      ]
+      ],
+      "thresholdBlock": 70,
+      "thresholdReview": 35
     }
   ],
   "vault": [
-    "secretref://prod/github/token",
-    "secretref://prod/slack/webhook"
+    "secretref://prod/api/key"
   ]
 }
