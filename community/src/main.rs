@@ -49,14 +49,14 @@ async fn init_storage_bundle(db_url: &str) -> Result<StorageBundle, String> {
                         .map_err(|e| format!("Failed to initialize SQLite database: {e}"))?,
                 );
 
-                return Ok(StorageBundle {
+                Ok(StorageBundle {
                     audit_store: storage.clone(),
                     review_store: storage.clone(),
                     policy_store: storage.clone(),
                     api_key_store: storage.clone(),
                     tenant_store: storage,
                     storage_backend: StorageBackend::Sqlite,
-                });
+                })
             }
 
             #[cfg(not(feature = "sqlite"))]
@@ -73,14 +73,14 @@ async fn init_storage_bundle(db_url: &str) -> Result<StorageBundle, String> {
                         .map_err(|e| format!("Failed to initialize PostgreSQL database: {e}"))?,
                 );
 
-                return Ok(StorageBundle {
+                Ok(StorageBundle {
                     audit_store: storage.clone(),
                     review_store: storage.clone(),
                     policy_store: storage.clone(),
                     api_key_store: storage.clone(),
                     tenant_store: storage,
                     storage_backend: StorageBackend::Postgres,
-                });
+                })
             }
 
             #[cfg(not(feature = "postgres"))]
