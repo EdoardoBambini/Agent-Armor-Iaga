@@ -10,7 +10,7 @@ use agent_armor::modules::threat_intel::feed::ThreatFeed;
 use agent_armor::server::app_state::AppState;
 use agent_armor::server::create_server::create_router;
 use agent_armor::storage::sqlite::SqliteStorage;
-use agent_armor::storage::traits::PolicyStore;
+use agent_armor::storage::traits::{PolicyStore, StorageBackend};
 
 #[tokio::main]
 async fn main() {
@@ -60,11 +60,13 @@ async fn main() {
         review_store: storage.clone(),
         policy_store: storage.clone(),
         api_key_store: storage.clone(),
+        tenant_store: storage.clone(),
         event_bus,
         webhook_manager,
         behavioral_engine: Arc::new(BehavioralEngine::new()),
         rate_limiter: Arc::new(RateLimiter::new(Default::default())),
         threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
+        storage_backend: StorageBackend::Sqlite,
         env: app_env,
     });
 
