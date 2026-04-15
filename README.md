@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/brain.gif" alt="Agent Armor" width="600">
+  <img src="assets/hero.gif" alt="Agent Armor" width="600">
 </p>
 
 ---
