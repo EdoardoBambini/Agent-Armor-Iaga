@@ -10,10 +10,7 @@ use uuid::Uuid;
 const EXAMPLE_PLUGIN_WAT: &str = "examples/plugins/review_hint.wat";
 
 fn temp_plugin_dir() -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "agent-armor-example-plugin-{}",
-        Uuid::new_v4()
-    ))
+    std::env::temp_dir().join(format!("agent-armor-example-plugin-{}", Uuid::new_v4()))
 }
 
 #[test]
