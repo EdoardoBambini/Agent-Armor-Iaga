@@ -13,7 +13,7 @@ pub struct PluginManifest {
 }
 
 /// The result returned by a single plugin's `on_inspect()` call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginResult {
     /// Risk contribution from this plugin (0-100).
@@ -47,15 +47,6 @@ pub struct PluginInspectRequest {
     pub risk_score: u32,
 }
 
-impl Default for PluginResult {
-    fn default() -> Self {
-        Self {
-            risk_score: 0,
-            findings: Vec::new(),
-            decision_hint: None,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

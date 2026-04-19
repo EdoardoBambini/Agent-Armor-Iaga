@@ -240,7 +240,7 @@ impl AuditStore for SqliteStorage {
                 }
             }
             let mut top_tools: Vec<(String, u64)> = tool_counts.into_iter().collect();
-            top_tools.sort_by(|a, b| b.1.cmp(&a.1));
+            top_tools.sort_by_key(|t| std::cmp::Reverse(t.1));
             top_tools.truncate(5);
 
             let trust = crate::modules::nhi::crypto_identity::get_agent_trust(&aid);
@@ -1084,7 +1084,7 @@ impl SessionStore for SqliteStorage {
     async fn store_session(&self, session: &SessionDAG) -> Result<(), ArmorError> {
         let nodes_json = serde_json::to_string(&session.nodes).unwrap_or_default();
         let edges_json = serde_json::to_string(&session.edges).unwrap_or_default();
-        let state = serde_json::to_value(&session.state)
+        let state = serde_json::to_value(session.state)
             .unwrap_or_default()
             .as_str()
             .unwrap_or("idle")

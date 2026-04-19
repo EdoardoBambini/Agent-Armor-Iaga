@@ -360,7 +360,7 @@ pub fn export_otlp_json(limit: usize) -> Vec<TelemetryRecord> {
         });
     }
 
-    records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    records.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
     records.truncate(limit);
     records
 }
