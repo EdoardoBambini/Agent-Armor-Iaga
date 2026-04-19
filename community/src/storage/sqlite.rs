@@ -5,6 +5,7 @@ use super::migrations::run_sqlite_migrations;
 use super::traits::*;
 use crate::core::errors::ArmorError;
 use crate::core::types::*;
+use crate::modules::policy::rules_engine::PolicyRule;
 
 pub struct SqliteStorage {
     pool: SqlitePool,
@@ -475,6 +476,23 @@ impl PolicyStore for SqliteStorage {
         Ok(rows.into_iter().map(|r| r.into_profile()).collect())
     }
 
+    async fn list_workspace_rules(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<PolicyRule>, ArmorError> {
+        let rows = sqlx::query(
+            "SELECT id, name, priority, match_criteria, conditions, decision, reason, enabled
+             FROM policy_rules
+             WHERE workspace_id = ?
+             ORDER BY priority ASC, id ASC",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter().map(sqlite_row_to_policy_rule).collect()
+    }
+
     async fn list_workspaces(&self) -> Result<Vec<WorkspacePolicy>, ArmorError> {
         let rows = sqlx::query_as::<_, WorkspaceRow>(
             "SELECT workspace_id, tenant_id, allowed_protocols, allowed_domains, tools, threshold_block, threshold_review
@@ -550,6 +568,51 @@ impl PolicyStore for SqliteStorage {
         .bind(&tools)
         .bind(policy.threshold_block as i64)
         .bind(policy.threshold_review as i64)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn upsert_workspace_rule(
+        &self,
+        workspace_id: &str,
+        rule: &PolicyRule,
+    ) -> Result<(), ArmorError> {
+        let match_criteria = serde_json::to_string(&rule.match_criteria).unwrap_or_default();
+        let conditions = serde_json::to_string(&rule.conditions).unwrap_or_default();
+        let decision = serde_json::to_value(rule.decision)
+            .unwrap_or_default()
+            .as_str()
+            .unwrap_or("review")
+            .to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO policy_rules (id, workspace_id, name, priority, match_criteria, conditions, decision, reason, enabled, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                workspace_id = excluded.workspace_id,
+                name = excluded.name,
+                priority = excluded.priority,
+                match_criteria = excluded.match_criteria,
+                conditions = excluded.conditions,
+                decision = excluded.decision,
+                reason = excluded.reason,
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at"
+        )
+        .bind(&rule.id)
+        .bind(workspace_id)
+        .bind(&rule.name)
+        .bind(rule.priority)
+        .bind(&match_criteria)
+        .bind(&conditions)
+        .bind(&decision)
+        .bind(&rule.reason)
+        .bind(rule.enabled as i64)
+        .bind(&now)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -656,6 +719,27 @@ impl WorkspaceRow {
             threshold_review: self.threshold_review as u32,
         }
     }
+}
+
+fn sqlite_row_to_policy_rule(row: &sqlx::sqlite::SqliteRow) -> Result<PolicyRule, ArmorError> {
+    use sqlx::Row;
+
+    let match_criteria: String = row.try_get("match_criteria")?;
+    let conditions: String = row.try_get("conditions")?;
+    let decision: String = row.try_get("decision")?;
+    let enabled: i64 = row.try_get("enabled").unwrap_or(1);
+
+    Ok(PolicyRule {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        priority: row.try_get("priority").unwrap_or(0),
+        match_criteria: serde_json::from_str(&match_criteria).unwrap_or_default(),
+        conditions: serde_json::from_str(&conditions).unwrap_or_default(),
+        decision: serde_json::from_value(serde_json::Value::String(decision))
+            .unwrap_or(GovernanceDecision::Review),
+        reason: row.try_get("reason").unwrap_or(None),
+        enabled: enabled != 0,
+    })
 }
 
 // ── ApiKeyStore ──
@@ -807,6 +891,533 @@ impl TenantStore for SqliteStorage {
             .bind(tenant_id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+}
+
+// ── NhiStore ──
+
+use crate::modules::nhi::crypto_identity::{AgentIdentity, PendingChallenge};
+
+#[async_trait]
+impl NhiStore for SqliteStorage {
+    async fn store_identity(
+        &self,
+        identity: &AgentIdentity,
+        secret_key_hex: &str,
+    ) -> Result<(), ArmorError> {
+        let capabilities = serde_json::to_string(&identity.capabilities).unwrap_or_default();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO nhi_identities (agent_id, spiffe_id, public_key_hex, secret_key_hex, attestation_status, trust_score, capabilities, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(agent_id) DO UPDATE SET
+                spiffe_id = excluded.spiffe_id,
+                public_key_hex = excluded.public_key_hex,
+                secret_key_hex = excluded.secret_key_hex,
+                attestation_status = excluded.attestation_status,
+                trust_score = excluded.trust_score,
+                capabilities = excluded.capabilities,
+                updated_at = excluded.updated_at"
+        )
+        .bind(&identity.agent_id)
+        .bind(&identity.spiffe_id)
+        .bind(&identity.public_key_hex)
+        .bind(secret_key_hex)
+        .bind(&identity.attestation_status)
+        .bind(identity.trust_score)
+        .bind(&capabilities)
+        .bind(&identity.created_at)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn get_identity(&self, agent_id: &str) -> Result<Option<AgentIdentity>, ArmorError> {
+        use sqlx::Row;
+
+        let row = sqlx::query(
+            "SELECT agent_id, spiffe_id, public_key_hex, attestation_status, trust_score, capabilities, created_at
+             FROM nhi_identities WHERE agent_id = ?"
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(r) => {
+                let caps_json: String = r.try_get("capabilities").unwrap_or_default();
+                Ok(Some(AgentIdentity {
+                    agent_id: r.try_get("agent_id")?,
+                    spiffe_id: r.try_get("spiffe_id")?,
+                    public_key_hex: r.try_get("public_key_hex")?,
+                    created_at: r.try_get("created_at")?,
+                    attestation_status: r.try_get("attestation_status")?,
+                    trust_score: r.try_get("trust_score").unwrap_or(0.5),
+                    capabilities: serde_json::from_str(&caps_json).unwrap_or_default(),
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn get_secret_key_hex(&self, agent_id: &str) -> Result<Option<String>, ArmorError> {
+        let key: Option<String> =
+            sqlx::query_scalar("SELECT secret_key_hex FROM nhi_identities WHERE agent_id = ?")
+                .bind(agent_id)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        Ok(key)
+    }
+
+    async fn list_identities(&self) -> Result<Vec<AgentIdentity>, ArmorError> {
+        use sqlx::Row;
+
+        let rows = sqlx::query(
+            "SELECT agent_id, spiffe_id, public_key_hex, attestation_status, trust_score, capabilities, created_at
+             FROM nhi_identities ORDER BY created_at"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut identities = Vec::new();
+        for r in &rows {
+            let caps_json: String = r.try_get("capabilities").unwrap_or_default();
+            identities.push(AgentIdentity {
+                agent_id: r.try_get("agent_id")?,
+                spiffe_id: r.try_get("spiffe_id")?,
+                public_key_hex: r.try_get("public_key_hex")?,
+                created_at: r.try_get("created_at")?,
+                attestation_status: r.try_get("attestation_status")?,
+                trust_score: r.try_get("trust_score").unwrap_or(0.5),
+                capabilities: serde_json::from_str(&caps_json).unwrap_or_default(),
+            });
+        }
+        Ok(identities)
+    }
+
+    async fn update_trust(&self, agent_id: &str, trust_score: f64) -> Result<(), ArmorError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query("UPDATE nhi_identities SET trust_score = ?, updated_at = ? WHERE agent_id = ?")
+            .bind(trust_score)
+            .bind(&now)
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn store_challenge(&self, challenge: &PendingChallenge) -> Result<(), ArmorError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO nhi_challenges (challenge_id, agent_id, nonce, expires_at, created_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(challenge_id) DO UPDATE SET
+                agent_id = excluded.agent_id,
+                nonce = excluded.nonce,
+                expires_at = excluded.expires_at,
+                created_at = excluded.created_at",
+        )
+        .bind(&challenge.challenge_id)
+        .bind(&challenge.agent_id)
+        .bind(&challenge.nonce)
+        .bind(&challenge.expires_at)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn get_challenge(
+        &self,
+        challenge_id: &str,
+    ) -> Result<Option<PendingChallenge>, ArmorError> {
+        use sqlx::Row;
+
+        let row = sqlx::query(
+            "SELECT challenge_id, agent_id, nonce, expires_at FROM nhi_challenges WHERE challenge_id = ?"
+        )
+        .bind(challenge_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(r) => Ok(Some(PendingChallenge {
+                challenge_id: r.try_get("challenge_id")?,
+                agent_id: r.try_get("agent_id")?,
+                nonce: r.try_get("nonce")?,
+                expires_at: r.try_get("expires_at")?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    async fn delete_challenge(&self, challenge_id: &str) -> Result<(), ArmorError> {
+        sqlx::query("DELETE FROM nhi_challenges WHERE challenge_id = ?")
+            .bind(challenge_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn prune_expired_challenges(&self) -> Result<usize, ArmorError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = sqlx::query("DELETE FROM nhi_challenges WHERE expires_at < ?")
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() as usize)
+    }
+}
+
+// ── SessionStore ──
+
+use crate::modules::session_graph::session_dag::{FSAState, SessionDAG};
+
+#[async_trait]
+impl SessionStore for SqliteStorage {
+    async fn store_session(&self, session: &SessionDAG) -> Result<(), ArmorError> {
+        let nodes_json = serde_json::to_string(&session.nodes).unwrap_or_default();
+        let edges_json = serde_json::to_string(&session.edges).unwrap_or_default();
+        let state = serde_json::to_value(&session.state)
+            .unwrap_or_default()
+            .as_str()
+            .unwrap_or("idle")
+            .to_string();
+
+        sqlx::query(
+            "INSERT INTO session_graphs (session_id, agent_id, state, blocked, block_reason, blocked_at, block_count, nodes_json, edges_json, created_at, last_activity)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(session_id) DO UPDATE SET
+                agent_id = excluded.agent_id,
+                state = excluded.state,
+                blocked = excluded.blocked,
+                block_reason = excluded.block_reason,
+                blocked_at = excluded.blocked_at,
+                block_count = excluded.block_count,
+                nodes_json = excluded.nodes_json,
+                edges_json = excluded.edges_json,
+                last_activity = excluded.last_activity"
+        )
+        .bind(&session.session_id)
+        .bind(&session.agent_id)
+        .bind(&state)
+        .bind(session.blocked as i64)
+        .bind(&session.block_reason)
+        .bind(session.blocked_at as i64)
+        .bind(session.block_count as i64)
+        .bind(&nodes_json)
+        .bind(&edges_json)
+        .bind(session.created_at as i64)
+        .bind(session.last_activity as i64)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn get_session(&self, session_id: &str) -> Result<Option<SessionDAG>, ArmorError> {
+        let row = sqlx::query(
+            "SELECT session_id, agent_id, state, blocked, block_reason, blocked_at, block_count, nodes_json, edges_json, created_at, last_activity
+             FROM session_graphs WHERE session_id = ?"
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(r) => Ok(Some(session_dag_from_row(&r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<SessionDAG>, ArmorError> {
+        let rows = sqlx::query(
+            "SELECT session_id, agent_id, state, blocked, block_reason, blocked_at, block_count, nodes_json, edges_json, created_at, last_activity
+             FROM session_graphs ORDER BY last_activity DESC"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut sessions = Vec::new();
+        for r in &rows {
+            sessions.push(session_dag_from_row(r)?);
+        }
+        Ok(sessions)
+    }
+
+    async fn delete_session(&self, session_id: &str) -> Result<(), ArmorError> {
+        sqlx::query("DELETE FROM session_graphs WHERE session_id = ?")
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn prune_stale_sessions(&self, max_age_ms: u64) -> Result<usize, ArmorError> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let cutoff = now_ms - max_age_ms as i64;
+
+        let result = sqlx::query("DELETE FROM session_graphs WHERE last_activity < ?")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() as usize)
+    }
+}
+
+fn session_dag_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<SessionDAG, ArmorError> {
+    use sqlx::Row;
+
+    let nodes_json: String = r.try_get("nodes_json").unwrap_or_default();
+    let edges_json: String = r.try_get("edges_json").unwrap_or_default();
+    let state_str: String = r.try_get("state").unwrap_or_else(|_| "idle".to_string());
+    let blocked_int: i64 = r.try_get("blocked").unwrap_or(0);
+
+    Ok(SessionDAG {
+        session_id: r.try_get("session_id")?,
+        agent_id: r.try_get("agent_id")?,
+        nodes: serde_json::from_str(&nodes_json).unwrap_or_default(),
+        edges: serde_json::from_str(&edges_json).unwrap_or_default(),
+        created_at: r.try_get::<i64, _>("created_at").unwrap_or(0) as u64,
+        last_activity: r.try_get::<i64, _>("last_activity").unwrap_or(0) as u64,
+        state: serde_json::from_value(serde_json::Value::String(state_str))
+            .unwrap_or(FSAState::Idle),
+        blocked: blocked_int != 0,
+        block_reason: r.try_get("block_reason").unwrap_or(None),
+        blocked_at: r.try_get::<i64, _>("blocked_at").unwrap_or(0) as u64,
+        block_count: r.try_get::<i64, _>("block_count").unwrap_or(0) as u32,
+    })
+}
+
+// ── TaintStore ──
+
+use std::collections::HashSet;
+
+#[async_trait]
+impl TaintStore for SqliteStorage {
+    async fn get_session_taint(&self, session_id: &str) -> Result<HashSet<String>, ArmorError> {
+        use sqlx::Row;
+
+        let row = sqlx::query("SELECT labels_json FROM taint_sessions WHERE session_id = ?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        match row {
+            Some(r) => {
+                let labels_json: String = r.try_get("labels_json").unwrap_or_default();
+                Ok(serde_json::from_str(&labels_json).unwrap_or_default())
+            }
+            None => Ok(HashSet::new()),
+        }
+    }
+
+    async fn update_session_taint(
+        &self,
+        session_id: &str,
+        labels: &HashSet<String>,
+    ) -> Result<(), ArmorError> {
+        let labels_json = serde_json::to_string(labels).unwrap_or_default();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO taint_sessions (session_id, labels_json, updated_at)
+             VALUES (?, ?, ?)
+             ON CONFLICT(session_id) DO UPDATE SET
+                labels_json = excluded.labels_json,
+                updated_at = excluded.updated_at",
+        )
+        .bind(session_id)
+        .bind(&labels_json)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn prune_stale_sessions(&self, max_age_secs: u64) -> Result<usize, ArmorError> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(max_age_secs as i64);
+        let cutoff_str = cutoff.to_rfc3339();
+
+        let result = sqlx::query("DELETE FROM taint_sessions WHERE updated_at < ?")
+            .bind(&cutoff_str)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() as usize)
+    }
+}
+
+// ── FingerprintStore ──
+
+use crate::modules::fingerprint::behavioral::AgentFingerprint;
+
+#[async_trait]
+impl FingerprintStore for SqliteStorage {
+    async fn get_fingerprint(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<AgentFingerprint>, ArmorError> {
+        let row = sqlx::query(
+            "SELECT agent_id, total_requests, tool_usage, action_types, avg_risk_score, peak_risk_score, hourly_pattern, anomaly_score, first_seen, last_seen, flags
+             FROM fingerprints WHERE agent_id = ?"
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(r) => Ok(Some(fingerprint_from_row(&r)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn upsert_fingerprint(&self, fp: &AgentFingerprint) -> Result<(), ArmorError> {
+        let tool_usage = serde_json::to_string(&fp.tool_usage).unwrap_or_default();
+        let action_types = serde_json::to_string(&fp.action_types).unwrap_or_default();
+        let hourly_pattern = serde_json::to_string(&fp.hourly_pattern).unwrap_or_default();
+        let flags = serde_json::to_string(&fp.flags).unwrap_or_default();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO fingerprints (agent_id, total_requests, tool_usage, action_types, avg_risk_score, peak_risk_score, hourly_pattern, anomaly_score, first_seen, last_seen, flags, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(agent_id) DO UPDATE SET
+                total_requests = excluded.total_requests,
+                tool_usage = excluded.tool_usage,
+                action_types = excluded.action_types,
+                avg_risk_score = excluded.avg_risk_score,
+                peak_risk_score = excluded.peak_risk_score,
+                hourly_pattern = excluded.hourly_pattern,
+                anomaly_score = excluded.anomaly_score,
+                first_seen = excluded.first_seen,
+                last_seen = excluded.last_seen,
+                flags = excluded.flags,
+                updated_at = excluded.updated_at"
+        )
+        .bind(&fp.agent_id)
+        .bind(fp.total_requests as i64)
+        .bind(&tool_usage)
+        .bind(&action_types)
+        .bind(fp.avg_risk_score)
+        .bind(fp.peak_risk_score)
+        .bind(&hourly_pattern)
+        .bind(fp.anomaly_score)
+        .bind(&fp.first_seen)
+        .bind(&fp.last_seen)
+        .bind(&flags)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn list_fingerprints(&self) -> Result<Vec<AgentFingerprint>, ArmorError> {
+        let rows = sqlx::query(
+            "SELECT agent_id, total_requests, tool_usage, action_types, avg_risk_score, peak_risk_score, hourly_pattern, anomaly_score, first_seen, last_seen, flags
+             FROM fingerprints ORDER BY last_seen DESC"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut fingerprints = Vec::new();
+        for r in &rows {
+            fingerprints.push(fingerprint_from_row(r)?);
+        }
+        Ok(fingerprints)
+    }
+
+    async fn delete_fingerprint(&self, agent_id: &str) -> Result<(), ArmorError> {
+        sqlx::query("DELETE FROM fingerprints WHERE agent_id = ?")
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}
+
+fn fingerprint_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<AgentFingerprint, ArmorError> {
+    use sqlx::Row;
+
+    let tool_usage_json: String = r.try_get("tool_usage").unwrap_or_default();
+    let action_types_json: String = r.try_get("action_types").unwrap_or_default();
+    let hourly_json: String = r.try_get("hourly_pattern").unwrap_or_default();
+    let flags_json: String = r.try_get("flags").unwrap_or_default();
+
+    let hourly_vec: Vec<u64> =
+        serde_json::from_str(&hourly_json).unwrap_or_else(|_| vec![0u64; 24]);
+    let mut hourly_pattern = [0u64; 24];
+    for (i, v) in hourly_vec.iter().enumerate().take(24) {
+        hourly_pattern[i] = *v;
+    }
+
+    Ok(AgentFingerprint {
+        agent_id: r.try_get("agent_id")?,
+        total_requests: r.try_get::<i64, _>("total_requests").unwrap_or(0) as u64,
+        tool_usage: serde_json::from_str(&tool_usage_json).unwrap_or_default(),
+        action_types: serde_json::from_str(&action_types_json).unwrap_or_default(),
+        avg_risk_score: r.try_get("avg_risk_score").unwrap_or(0.0),
+        peak_risk_score: r.try_get("peak_risk_score").unwrap_or(0.0),
+        hourly_pattern,
+        anomaly_score: r.try_get("anomaly_score").unwrap_or(0.0),
+        first_seen: r.try_get("first_seen")?,
+        last_seen: r.try_get("last_seen")?,
+        flags: serde_json::from_str(&flags_json).unwrap_or_default(),
+    })
+}
+
+// ── RateLimitStore ──
+
+#[async_trait]
+impl RateLimitStore for SqliteStorage {
+    async fn load_config(&self) -> Result<Option<RateLimitConfig>, ArmorError> {
+        use sqlx::Row;
+
+        let row = sqlx::query(
+            "SELECT max_per_minute, max_per_hour, burst_limit FROM rate_limit_config WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(r) => Ok(Some(RateLimitConfig {
+                max_per_minute: r.try_get::<i64, _>("max_per_minute").unwrap_or(60) as u32,
+                max_per_hour: r.try_get::<i64, _>("max_per_hour").unwrap_or(600) as u32,
+                burst_limit: r.try_get::<i64, _>("burst_limit").unwrap_or(10) as u32,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    async fn save_config(&self, config: &RateLimitConfig) -> Result<(), ArmorError> {
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO rate_limit_config (id, max_per_minute, max_per_hour, burst_limit, updated_at)
+             VALUES (1, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                max_per_minute = excluded.max_per_minute,
+                max_per_hour = excluded.max_per_hour,
+                burst_limit = excluded.burst_limit,
+                updated_at = excluded.updated_at"
+        )
+        .bind(config.max_per_minute as i64)
+        .bind(config.max_per_hour as i64)
+        .bind(config.burst_limit as i64)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 }

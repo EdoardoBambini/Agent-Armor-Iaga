@@ -5,17 +5,17 @@
 </p>
 
 <p align="center">
-  <a href="#agent-armor-030-community">v0.3.0</a> •
-  <a href="#quick-start">Quick Start</a> •
-  <a href="#what-ships-in-community-030">Community Features</a> •
-  <a href="#docs">Docs</a> •
+  <a href="#agent-armor-040-community">v0.4.0</a> -
+  <a href="#quick-start">Quick Start</a> -
+  <a href="#what-ships-in-community-040">Community Features</a> -
+  <a href="#docs">Docs</a> -
   <a href="#testing-and-verification">Testing</a>
 </p>
 
 <p align="center">
   <a href="https://github.com/EdoardoBambini/Agent-Armor-Iaga/actions"><img src="https://github.com/EdoardoBambini/Agent-Armor-Iaga/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-BUSL--1.1-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-0.3.0-purple" alt="Version 0.3.0">
+  <img src="https://img.shields.io/badge/version-0.4.0-purple" alt="Version 0.4.0">
   <img src="https://img.shields.io/badge/rust-1.75%2B-orange" alt="Rust">
 </p>
 
@@ -25,27 +25,29 @@
 
 ---
 
-## Agent Armor 0.3.0 Community
+## Agent Armor 0.4.0 Community
 
-`0.3.0` is the current community-scope release in this repository.
+`0.4.0` is the current community release in this repository.
 
-It ships a working open-core runtime with:
+It ships a real governance runtime with:
 
-- the full 8-layer governance pipeline
-- response scanning, rate limiting, fingerprinting, and threat intel
+- the full 8-layer pipeline
+- sequence-aware session hardening for same-session multi-call behavior
+- persisted workspace rules and built-in policy templates
+- feature-gated WASM plugin loading, runtime evaluation, and CLI inspection
 - SQLite by default plus optional PostgreSQL support
-- versioned storage migrations via `sqlx`
-- structured logging with log-level control
-- HTTP request correlation with `x-request-id`
-- pipeline correlation with `traceId`
-- live HTTP end-to-end tests that exercise the running server
+- expanded Python and TypeScript SDKs plus lightweight framework adapters
+- live HTTP end-to-end tests, CLI tests, and real plugin-path validation
 
-It does **not** attempt to ship the enterprise roadmap in this release.
+It is stronger than `0.3.0`, but it is still not the end of the full roadmap.
+The main remaining gaps are the durable-state restart story and the advanced CLI
+commands called out below.
 
 ## Why It Exists
 
-AI agents now get shell access, file access, HTTP access, database access, and secret access.
-Most stacks can execute tool calls, but they do not govern them well.
+AI agents now get shell access, file access, HTTP access, database access, and
+secret access. Most stacks can execute tool calls, but they do not govern them
+well.
 
 Agent Armor sits in front of those actions and decides:
 
@@ -55,7 +57,7 @@ Agent Armor sits in front of those actions and decides:
 
 with an audit trail, risk scoring, and per-layer evidence.
 
-## What Ships In Community 0.3.0
+## What Ships In Community 0.4.0
 
 ### Core Runtime
 
@@ -63,10 +65,33 @@ with an audit trail, risk scoring, and per-layer evidence.
 - MCP-aware inspection path
 - ACP and A2A protocol inspection with built-in envelope validation
 - policy evaluation with workspace thresholds
+- policy templates and persisted workspace rules
 - secret reference planning
 - human review queue
 - audit trail and audit export
 - MCP proxy mode and MCP server mode over stdio
+
+### 0.4.0 Hardening And Extensibility
+
+- adaptive risk scoring now consumes real session depth and recent timestamps
+- same-session arcs like `file_read -> http` are tested through integration and
+  live HTTP paths
+- WASM plugin runtime is wired into the pipeline and exposed via:
+  - `GET /v1/plugins`
+  - `POST /v1/plugins/reload`
+  - `agent-armor plugins list`
+  - `agent-armor plugins validate <path.wasm>`
+- `community/examples/plugins/review_hint.wat` is compiled and validated in
+  tests and CI
+
+### SDKs And Adapters
+
+- Python SDK covers governance, policy, plugin, audit, telemetry, review,
+  threat intel, NHI, response, and rate-limit endpoints
+- TypeScript SDK covers the same runtime surface with `sessionId` support
+- dependency-light adapters are included for:
+  - Python: OpenAI, LangChain, CrewAI, AutoGen
+  - TypeScript: OpenAI, Vercel AI style middleware helpers
 
 ### Operational Security Features
 
@@ -81,23 +106,28 @@ with an audit trail, risk scoring, and per-layer evidence.
 - SQLite storage backend
 - optional PostgreSQL backend behind `--features postgres`
 - versioned migrations in `community/migrations/`
-- `agent-armor migrate` for schema bootstrap/update
+- `agent-armor migrate` for schema bootstrap and update
 - structured logging: `pretty`, `compact`, `json`
 - log filtering via `RUST_LOG` or `AGENT_ARMOR_LOG_LEVEL`
-- request/response correlation with `x-request-id`
+- request and response correlation with `x-request-id`
 - governance result correlation with `traceId`
 
 ## Current Community Limits
 
 The following community items are still missing or incomplete:
 
-- framework adapters
-- persistence refactors for modules that still keep runtime state in memory
-  `nhi`, `session_graph`, `taint`, `fingerprint`, and firewall stats still need a fuller storage move
+- durable-state persistence is only partially closed as a restart story
+  `nhi`, `session_graph`, `taint`, `fingerprint`, and rate-limit state now have
+  storage traits and persistence hooks, but startup hydration and restart-proof
+  validation are not fully closed yet
+- enhanced CLI roadmap items are still open beyond the current commands
+  `watch`, `replay`, `benchmark`, and `policy-test` are not shipped yet
+- SDK coverage is materially broader now, but some responses are still exposed
+  as generic JSON objects instead of fully typed SDK models
 
 ### Dashboard Status
 
-The dashboard is now a live operator console backed by real runtime endpoints.
+The dashboard is a live operator console backed by real runtime endpoints.
 
 It supports:
 
@@ -107,7 +137,8 @@ It supports:
 - selected-agent drill-down backed by analytics, fingerprint, and rate-limit endpoints
 - runtime controls and posture panels backed by health, firewall, threat intel, telemetry, and policy verification data
 
-When the runtime is protected, the dashboard requires a valid API key and does not fall back to fake demo counters.
+When the runtime is protected, the dashboard requires a valid API key and does
+not fall back to fake demo counters.
 
 ## Quick Start
 
@@ -122,6 +153,9 @@ cargo build --release
 
 # Start the runtime
 ./target/release/agent-armor serve
+
+# Inspect discovered plugins
+./target/release/agent-armor plugins list
 ```
 
 Open `http://localhost:4010` for the dashboard.
@@ -165,6 +199,9 @@ curl -X POST http://localhost:4010/v1/inspect \
     "agentId": "openclaw-builder-01",
     "workspaceId": "ws-demo",
     "framework": "openclaw",
+    "metadata": {
+      "sessionId": "session-123"
+    },
     "protocol": "mcp",
     "action": {
       "type": "file_read",
@@ -189,77 +226,38 @@ curl -X POST http://localhost:4010/v1/response/scan \
     }
   }'
 
-# Export audit data
-curl "http://localhost:4010/v1/audit/export?format=csv" \
+# List plugin registry state
+curl http://localhost:4010/v1/plugins \
   -H "Authorization: Bearer <key>"
 ```
 
 ## MCP Stdio Example
 
-Run the built-in MCP client example to exercise `initialize`, `tools/list`, and `tools/call`
-against `agent-armor mcp-server` over stdio:
+Run the built-in MCP client example to exercise `initialize`, `tools/list`, and
+`tools/call` against `agent-armor mcp-server` over stdio:
 
 ```bash
 cd community
 cargo run --example mcp_stdio_client
 ```
 
-The example uses a temporary SQLite database, seeds demo policies, and prints the JSON-RPC
-responses for:
+## Plugin Example
 
-- `initialize`
-- `tools/list`
-- `agentarmor.inspect`
-- `agentarmor.response_scan`
+A real example plugin source lives in `community/examples/plugins/review_hint.wat`.
+The runtime loads `.wasm`, so the test and CI path compiles that WAT source and
+validates it against the Agent Armor plugin ABI.
 
 ## Docs
 
-All current docs for `0.3.0` are linked here.
+All current docs for `0.4.0` are linked here.
 
 | Document | Purpose |
 |---|---|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Current runtime architecture and module boundaries |
 | [`docs/DEMO.md`](docs/DEMO.md) | Demo and local walkthrough |
 | [`docs/CASE_STUDY.md`](docs/CASE_STUDY.md) | Historical v2 benchmark and evaluation write-up |
-
-This `README.md` is the canonical summary of shipped community capabilities, verification status, and current limits.
-
-## Architecture Snapshot
-
-```text
-community/src/
-|- main.rs                     # CLI entrypoint and runtime bootstrap
-|- core/                      # Types and errors
-|- server/                    # Axum router and shared state
-|- pipeline/                  # 8-layer governance orchestration
-|- modules/                   # DPI, taint, NHI, risk, sandbox, policy, firewall, telemetry
-|- events/                    # SSE, webhooks, event bus
-|- auth/                      # API keys and Bearer middleware
-|- mcp_server/                # MCP server mode
-|- mcp_proxy/                 # MCP proxy mode
-|- demo/                      # Seed data and demo scenarios
-`- storage/
-   |- traits.rs               # Storage abstractions
-   |- migrations.rs           # sqlx migration runner
-   |- sqlite.rs               # SQLite backend
-   `- postgres.rs             # PostgreSQL backend
-```
-
-### Storage
-
-- default backend: SQLite
-- optional backend: PostgreSQL
-- migration folders:
-  `community/migrations/sqlite/`
-  `community/migrations/postgres/`
-
-### Logging
-
-- `AGENT_ARMOR_LOG_FORMAT=pretty|compact|json`
-- `AGENT_ARMOR_LOG_LEVEL=info|debug|warn|error`
-- `RUST_LOG` still supported
-- every HTTP response gets `x-request-id`
-- every governance decision returns `traceId`
+| [`sdks/python/README.md`](sdks/python/README.md) | Python SDK quick start and adapters |
+| [`sdks/typescript/README.md`](sdks/typescript/README.md) | TypeScript SDK quick start and adapters |
 
 ## API Highlights
 
@@ -282,6 +280,9 @@ community/src/
 - `GET/PUT/DELETE /v1/profiles/:id`
 - `GET/POST /v1/workspaces`
 - `GET/PUT/DELETE /v1/workspaces/:id`
+- `GET/POST /v1/workspaces/:id/rules`
+- `GET /v1/templates`
+- `GET /v1/templates/:name`
 
 ### Response Security
 
@@ -296,64 +297,71 @@ community/src/
 - `POST /v1/firewall/scan`
 - `GET /v1/telemetry/spans`
 - `GET /v1/events/stream`
+- `GET /v1/plugins`
+- `POST /v1/plugins/reload`
 
 ### Identity And Auth
 
 - `GET/POST /v1/auth/keys`
 - `DELETE /v1/auth/keys/:id`
-- `GET /v1/nhi/identities`
+- `GET/POST /v1/nhi/identities`
+- `POST /v1/nhi/attest`
 - `POST /v1/nhi/challenge`
 - `POST /v1/nhi/verify`
 
 ## Testing And Verification
 
-`0.3.0` is verified at four layers:
+`0.4.0` is verified at four layers plus SDK and plugin-path smoke checks:
 
 - unit tests
 - property tests
 - direct integration tests
 - live HTTP end-to-end tests
+- CLI tests
+- example plugin compilation and execution tests
+- TypeScript SDK build
+- Python SDK compile smoke
 
 Current automated coverage:
 
 - `99` unit tests
 - `19` property tests
-- `7` integration tests
-- `4` end-to-end HTTP tests
+- `10` integration tests
+- `8` end-to-end HTTP tests
+- `3` CLI tests
+- `2` example plugin tests
 
-Total: `129` tests.
+Total: `173` Rust tests plus TypeScript and Python SDK build checks.
 
 Run them with:
 
 ```bash
 cd community
 
-# Full suite
-cargo test
+# Full Rust suite
+cargo test --features plugins
+
+# Example plugin validation only
+cargo test --features plugins --test plugin_example_tests
 
 # HTTP E2E only
 cargo test --test e2e_http_tests
 
 # PostgreSQL build verification
 cargo check --features postgres
+
+# TypeScript SDK build
+cd ../sdks/typescript && npm run build
+
+# Python SDK compile smoke
+cd ../python && python -m compileall agent_armor
 ```
 
-The HTTP E2E tests make real requests against a running Axum server and verify:
-
-- Bearer auth
-- `GET /health`
-- `POST /v1/inspect`
-- `POST /v1/response/scan`
-- `GET /v1/audit`
-- `GET /v1/audit/export?format=csv`
-- authenticated key creation
-- demo scenario execution
-- `x-request-id` propagation
-- `traceId` emission in governance responses
+The HTTP and integration tests exercise real authenticated requests, persisted
+workspace rules, same-session sequence behavior, real plugin directories, and
+`pluginResults` propagation in governance responses.
 
 ## Open-Core Boundary
-
-Community scope is intentionally narrower than the old enterprise `v3` concept.
 
 Community keeps:
 
@@ -361,12 +369,12 @@ Community keeps:
 - storage backends
 - migrations
 - logging and observability basics
-- CLI, HTTP API, MCP proxy, dashboard, and tests
+- CLI, HTTP API, MCP proxy, dashboard, SDKs, adapters, and tests
 
 Community does not currently include:
 
 - multi-tenant isolation
-- SSO / SAML / JWT / RBAC
+- SSO, SAML, JWT, or RBAC
 - SIEM integrations
 - ML firewall features
 - enterprise admin UX
@@ -381,4 +389,5 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Disclaimer
 
-Agent Armor is a governance layer, not a complete security program. Use it as part of a broader security posture.
+Agent Armor is a governance layer, not a complete security program. Use it as
+part of a broader security posture.

@@ -298,6 +298,7 @@ mod tests {
     use crate::modules::fingerprint::behavioral::BehavioralEngine;
     use crate::modules::rate_limit::limiter::RateLimiter;
     use crate::modules::threat_intel::feed::ThreatFeed;
+    use crate::plugins::PluginRegistry;
     use crate::storage::sqlite::SqliteStorage;
     use crate::storage::traits::{PolicyStore, StorageBackend};
 
@@ -349,11 +350,17 @@ mod tests {
             policy_store: storage.clone(),
             api_key_store: storage.clone(),
             tenant_store: storage.clone(),
+            nhi_store: storage.clone(),
+            session_store: storage.clone(),
+            taint_store: storage.clone(),
+            fingerprint_store: storage.clone(),
+            rate_limit_store: storage.clone(),
             event_bus: EventBus::new(32),
             webhook_manager: Arc::new(WebhookManager::new(Arc::new(DeadLetterQueue::new()))),
             behavioral_engine: Arc::new(BehavioralEngine::new()),
             rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
             threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
+            plugin_registry: Arc::new(PluginRegistry::default()),
             storage_backend: StorageBackend::Sqlite,
             env: AppEnv {
                 port: 0,

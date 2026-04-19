@@ -2,6 +2,11 @@ use async_trait::async_trait;
 
 use crate::core::errors::ArmorError;
 use crate::core::types::*;
+use crate::modules::fingerprint::behavioral::AgentFingerprint;
+use crate::modules::nhi::crypto_identity::{AgentIdentity, PendingChallenge};
+use crate::modules::policy::rules_engine::PolicyRule;
+use crate::modules::session_graph::session_dag::SessionDAG;
+use std::collections::HashSet;
 
 // Re-export async_trait for enterprise to use
 pub use async_trait::async_trait as storage_async_trait;
@@ -34,10 +39,17 @@ pub trait PolicyStore: Send + Sync {
     async fn get_agent_profile(&self, agent_id: &str) -> Result<AgentProfile, ArmorError>;
     async fn get_workspace_policy(&self, workspace_id: &str)
         -> Result<WorkspacePolicy, ArmorError>;
+    async fn list_workspace_rules(&self, workspace_id: &str)
+        -> Result<Vec<PolicyRule>, ArmorError>;
     async fn list_profiles(&self) -> Result<Vec<AgentProfile>, ArmorError>;
     async fn list_workspaces(&self) -> Result<Vec<WorkspacePolicy>, ArmorError>;
     async fn upsert_profile(&self, profile: &AgentProfile) -> Result<(), ArmorError>;
     async fn upsert_workspace(&self, policy: &WorkspacePolicy) -> Result<(), ArmorError>;
+    async fn upsert_workspace_rule(
+        &self,
+        workspace_id: &str,
+        rule: &PolicyRule,
+    ) -> Result<(), ArmorError>;
     async fn delete_profile(&self, agent_id: &str) -> Result<(), ArmorError>;
     async fn delete_workspace(&self, workspace_id: &str) -> Result<(), ArmorError>;
 }
@@ -64,6 +76,70 @@ pub trait TenantStore: Send + Sync {
     async fn get_tenant(&self, tenant_id: &str) -> Result<Tenant, ArmorError>;
     async fn list_tenants(&self) -> Result<Vec<Tenant>, ArmorError>;
     async fn delete_tenant(&self, tenant_id: &str) -> Result<(), ArmorError>;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// v0.4.0 — Durable State Storage Traits
+// ═══════════════════════════════════════════════════════════════
+
+/// Persistent storage for NHI (Non-Human Identity) layer.
+#[async_trait]
+pub trait NhiStore: Send + Sync {
+    async fn store_identity(
+        &self,
+        identity: &AgentIdentity,
+        secret_key_hex: &str,
+    ) -> Result<(), ArmorError>;
+    async fn get_identity(&self, agent_id: &str) -> Result<Option<AgentIdentity>, ArmorError>;
+    async fn get_secret_key_hex(&self, agent_id: &str) -> Result<Option<String>, ArmorError>;
+    async fn list_identities(&self) -> Result<Vec<AgentIdentity>, ArmorError>;
+    async fn update_trust(&self, agent_id: &str, trust_score: f64) -> Result<(), ArmorError>;
+    async fn store_challenge(&self, challenge: &PendingChallenge) -> Result<(), ArmorError>;
+    async fn get_challenge(
+        &self,
+        challenge_id: &str,
+    ) -> Result<Option<PendingChallenge>, ArmorError>;
+    async fn delete_challenge(&self, challenge_id: &str) -> Result<(), ArmorError>;
+    async fn prune_expired_challenges(&self) -> Result<usize, ArmorError>;
+}
+
+/// Persistent storage for Session Graph layer.
+#[async_trait]
+pub trait SessionStore: Send + Sync {
+    async fn store_session(&self, session: &SessionDAG) -> Result<(), ArmorError>;
+    async fn get_session(&self, session_id: &str) -> Result<Option<SessionDAG>, ArmorError>;
+    async fn list_sessions(&self) -> Result<Vec<SessionDAG>, ArmorError>;
+    async fn delete_session(&self, session_id: &str) -> Result<(), ArmorError>;
+    async fn prune_stale_sessions(&self, max_age_ms: u64) -> Result<usize, ArmorError>;
+}
+
+/// Persistent storage for Taint Tracking layer.
+#[async_trait]
+pub trait TaintStore: Send + Sync {
+    async fn get_session_taint(&self, session_id: &str) -> Result<HashSet<String>, ArmorError>;
+    async fn update_session_taint(
+        &self,
+        session_id: &str,
+        labels: &HashSet<String>,
+    ) -> Result<(), ArmorError>;
+    async fn prune_stale_sessions(&self, max_age_secs: u64) -> Result<usize, ArmorError>;
+}
+
+/// Persistent storage for Behavioral Fingerprinting.
+#[async_trait]
+pub trait FingerprintStore: Send + Sync {
+    async fn get_fingerprint(&self, agent_id: &str)
+        -> Result<Option<AgentFingerprint>, ArmorError>;
+    async fn upsert_fingerprint(&self, fp: &AgentFingerprint) -> Result<(), ArmorError>;
+    async fn list_fingerprints(&self) -> Result<Vec<AgentFingerprint>, ArmorError>;
+    async fn delete_fingerprint(&self, agent_id: &str) -> Result<(), ArmorError>;
+}
+
+/// Persistent storage for Rate Limit state.
+#[async_trait]
+pub trait RateLimitStore: Send + Sync {
+    async fn load_config(&self) -> Result<Option<RateLimitConfig>, ArmorError>;
+    async fn save_config(&self, config: &RateLimitConfig) -> Result<(), ArmorError>;
 }
 
 /// Describes which database backend is in use.

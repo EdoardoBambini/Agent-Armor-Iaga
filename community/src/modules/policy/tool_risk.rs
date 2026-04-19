@@ -47,6 +47,8 @@ pub struct LayerRiskContributions {
     pub policy: u32,
     /// Secret injection risk
     pub secrets: u32,
+    /// Optional WASM plugin risk contribution
+    pub plugins: u32,
 }
 
 pub fn score_tool_risk(
@@ -139,6 +141,7 @@ pub fn score_tool_risk_with_thresholds(
     //   - Taint + threat intel:      15%  — data flow & IOC matching
     //   - Secrets:                   10%  — vault policy enforcement
     //   - Session graph:              5%  — stateful anomaly
+    //   - WASM plugins:              10%  — custom detectors/community extensions
 
     let composite = (pattern_score as f64 * 0.15)
         + (layers.adaptive as f64 * 0.20)
@@ -146,7 +149,8 @@ pub fn score_tool_risk_with_thresholds(
         + ((layers.policy.max(layers.behavioral)) as f64 * 0.15)
         + ((layers.taint.max(layers.threat_intel)) as f64 * 0.15)
         + (layers.secrets as f64 * 0.10)
-        + (layers.session_graph as f64 * 0.05);
+        + (layers.session_graph as f64 * 0.05)
+        + (layers.plugins as f64 * 0.10);
 
     let mut score = (composite.round() as u32).min(100);
 

@@ -162,6 +162,18 @@ pub fn prune_stale_sessions(ttl: std::time::Duration) -> usize {
     before - store.len()
 }
 
+/// Hydrate taint labels into the in-memory store (used on startup to load from DB).
+pub fn hydrate_session_taint(session_id: &str, labels: HashSet<String>) {
+    let mut store = SESSION_TAINTS.lock().unwrap_or_else(|e| e.into_inner());
+    store.insert(
+        session_id.to_string(),
+        TimestampedTaint {
+            labels,
+            last_updated: std::time::Instant::now(),
+        },
+    );
+}
+
 // ── Source Classification ──
 
 fn is_secret_path(text: &str) -> bool {

@@ -410,3 +410,111 @@ pub fn apply_feedback(feedback: &str) {
     w.temporal /= sum;
     w.reputation /= sum;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn reset_state() {
+        let mut weights = WEIGHTS.lock().unwrap_or_else(|e| e.into_inner());
+        *weights = Weights::default();
+        drop(weights);
+
+        let mut baselines = BASELINES.lock().unwrap_or_else(|e| e.into_inner());
+        baselines.clear();
+    }
+
+    #[test]
+    fn adaptive_risk_uses_real_session_call_count() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_state();
+
+        for _ in 0..10 {
+            update_baseline("agent-session-aware", "tool-a", "file_read", 2);
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let timestamps = vec![now];
+        let input = AdaptiveScoreInput {
+            agent_id: "agent-session-aware",
+            action_type: "file_read",
+            tool_name: "tool-a",
+            payload_str: "{}",
+            taint_result: None,
+            session_call_count: 20,
+            call_timestamps: &timestamps,
+            agent_trust: 0.8,
+            tool_trust: 0.8,
+        };
+
+        let result = calculate_adaptive_risk(&input);
+        let behavioral = result
+            .signals
+            .iter()
+            .find(|signal| signal.name == "behavioral")
+            .expect("behavioral signal should exist");
+
+        assert!(
+            behavioral.score >= 40,
+            "expected elevated behavioral score from real session length, got {:?}",
+            behavioral
+        );
+        assert!(
+            behavioral
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("call count")),
+            "expected call-count deviation reason, got {:?}",
+            behavioral.reasons
+        );
+    }
+
+    #[test]
+    fn adaptive_risk_uses_recent_timestamps_for_burst_detection() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_state();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let timestamps = vec![now; 11];
+        let input = AdaptiveScoreInput {
+            agent_id: "agent-burst-aware",
+            action_type: "http",
+            tool_name: "tool-b",
+            payload_str: "{\"url\":\"https://example.com\"}",
+            taint_result: None,
+            session_call_count: 11,
+            call_timestamps: &timestamps,
+            agent_trust: 0.7,
+            tool_trust: 0.7,
+        };
+
+        let result = calculate_adaptive_risk(&input);
+        let temporal = result
+            .signals
+            .iter()
+            .find(|signal| signal.name == "temporal")
+            .expect("temporal signal should exist");
+
+        assert!(
+            temporal.score >= 50,
+            "expected burst detection from recent timestamps, got {:?}",
+            temporal
+        );
+        assert!(
+            temporal
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("burst")),
+            "expected burst reason, got {:?}",
+            temporal.reasons
+        );
+    }
+}

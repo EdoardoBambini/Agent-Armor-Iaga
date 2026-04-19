@@ -12,6 +12,7 @@ use crate::modules::injection_firewall::prompt_firewall;
 use crate::modules::nhi::crypto_identity;
 use crate::modules::policy::evaluate_policy::evaluate_policy;
 use crate::modules::policy::formal_verify;
+use crate::modules::policy::rules_engine::evaluate_rules;
 use crate::modules::policy::tool_risk::{score_tool_risk_with_thresholds, LayerRiskContributions};
 use crate::modules::protocol::detect_protocol::detect_protocol;
 use crate::modules::protocol::protocol_envelope::{
@@ -23,6 +24,7 @@ use crate::modules::secrets::secret_references::plan_secret_injection;
 use crate::modules::session_graph::session_dag;
 use crate::modules::taint::taint_tracker;
 use crate::modules::telemetry::otel_emitter;
+use crate::plugins::PluginInspectRequest;
 use crate::server::app_state::AppState;
 
 fn action_type_str(at: ActionType) -> &'static str {
@@ -160,6 +162,7 @@ pub async fn execute_pipeline(
             telemetry_span: None,
             behavioral_fingerprint: None,
             threat_intel: None,
+            plugin_results: None,
         });
     }
 
@@ -222,6 +225,17 @@ pub async fn execute_pipeline(
     );
     let session_json = serde_json::to_value(&session_result).ok();
 
+    // v0.4.0 — persist session graph to durable storage (write-behind)
+    if let Some(session) = session_dag::get_session(session_id) {
+        let session_store = state.session_store.clone();
+        let session_owned = session;
+        tokio::spawn(async move {
+            if let Err(e) = session_store.store_session(&session_owned).await {
+                tracing::warn!(error = %e, "failed to persist session graph");
+            }
+        });
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // LAYER 2 — Taint Tracking
     // ═══════════════════════════════════════════════════════════════
@@ -234,15 +248,36 @@ pub async fn execute_pipeline(
     taint_tracker::update_session_taint(session_id, &taint_result.accumulated_labels);
     let taint_json = serde_json::to_value(&taint_result).ok();
 
+    // v0.4.0 — persist taint labels to durable storage (write-behind)
+    {
+        let taint_store = state.taint_store.clone();
+        let sid = session_id.to_string();
+        let labels = taint_result.accumulated_labels.clone();
+        tokio::spawn(async move {
+            if let Err(e) = taint_store.update_session_taint(&sid, &labels).await {
+                tracing::warn!(error = %e, "failed to persist taint labels");
+            }
+        });
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // LAYER 3 — Crypto NHI (ensure agent identity exists)
     // ═══════════════════════════════════════════════════════════════
     if crypto_identity::get_identity(&input.agent_id).is_none() {
-        crypto_identity::register_identity(
+        let identity = crypto_identity::register_identity(
             &input.agent_id,
             Some(workspace_id),
             profile.approved_tools.clone(),
         );
+        // v0.4.0 — persist new NHI identity to durable storage
+        let secret_hex = crypto_identity::get_secret_key_hex(&input.agent_id).unwrap_or_default();
+        let nhi_store = state.nhi_store.clone();
+        let identity_owned = identity;
+        tokio::spawn(async move {
+            if let Err(e) = nhi_store.store_identity(&identity_owned, &secret_hex).await {
+                tracing::warn!(error = %e, "failed to persist NHI identity");
+            }
+        });
     }
     let agent_trust = crypto_identity::get_agent_trust(&input.agent_id);
 
@@ -253,7 +288,12 @@ pub async fn execute_pipeline(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    let call_timestamps = vec![now_ms]; // simplified; real system accumulates
+    let session_call_count = session_result.session_call_count.max(1);
+    let call_timestamps = if session_result.recent_call_timestamps.is_empty() {
+        vec![now_ms]
+    } else {
+        session_result.recent_call_timestamps.clone()
+    };
 
     let adaptive_input = AdaptiveScoreInput {
         agent_id: &input.agent_id,
@@ -261,7 +301,7 @@ pub async fn execute_pipeline(
         tool_name: &input.action.tool_name,
         payload_str: &payload_str,
         taint_result: Some(&taint_result),
-        session_call_count: 1, // each pipeline invocation is one call
+        session_call_count,
         call_timestamps: &call_timestamps,
         agent_trust,
         tool_trust: profile.tool_trust,
@@ -274,7 +314,7 @@ pub async fn execute_pipeline(
         &input.agent_id,
         &input.action.tool_name,
         action_type_s,
-        1, // single call per pipeline invocation
+        session_call_count,
     );
 
     // ═══════════════════════════════════════════════════════════════
@@ -291,6 +331,16 @@ pub async fn execute_pipeline(
         &input.action.tool_name,
         adaptive_result.total_score as f64,
     );
+
+    // v0.4.0 — persist behavioral fingerprint to durable storage (write-behind)
+    if let Some(fp) = state.behavioral_engine.get_fingerprint(&input.agent_id) {
+        let fp_store = state.fingerprint_store.clone();
+        tokio::spawn(async move {
+            if let Err(e) = fp_store.upsert_fingerprint(&fp).await {
+                tracing::warn!(error = %e, "failed to persist behavioral fingerprint");
+            }
+        });
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // LAYER 5 — Sandbox Execution (dry-run for high-risk)
@@ -314,14 +364,40 @@ pub async fn execute_pipeline(
     let verification = formal_verify::verify_policy(&workspace_policy);
     let verification_json = serde_json::to_value(&verification).ok();
 
+    let plugin_evaluation = state.plugin_registry.evaluate(&PluginInspectRequest {
+        agent_id: input.agent_id.clone(),
+        tool_name: input.action.tool_name.clone(),
+        action_type: action_type_s.to_string(),
+        framework: input.framework.clone(),
+        payload: payload_json.clone(),
+        risk_score: adaptive_result.total_score,
+    });
+
     // ═══════════════════════════════════════════════════════════════
     // Original policy evaluation + risk scoring
     // ═══════════════════════════════════════════════════════════════
     let policy_eval = evaluate_policy(input, &profile, &workspace_policy, protocol);
+    let workspace_rules = state
+        .policy_store
+        .list_workspace_rules(workspace_id)
+        .await?;
+    let matched_workspace_rule = evaluate_rules(
+        &workspace_rules,
+        input,
+        profile.role,
+        Some(adaptive_result.total_score),
+    );
     let secret_plan = plan_secret_injection(input, &profile);
     let secret_denied = !secret_plan.denied.is_empty();
 
     let mut policy_findings = policy_eval.findings;
+
+    if let Some(rule_match) = &matched_workspace_rule {
+        policy_findings.push(format!(
+            "policy rule [{}]: {}",
+            rule_match.rule_name, rule_match.reason
+        ));
+    }
 
     if secret_denied {
         policy_findings
@@ -333,11 +409,31 @@ pub async fn execute_pipeline(
             protocol_name(protocol)
         ));
     }
+    for error in &plugin_evaluation.errors {
+        policy_findings.push(format!("plugin runtime: {}", error));
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // Integrate 8-layer signals into decision + layer risk scores
     // ═══════════════════════════════════════════════════════════════
     let mut minimum_decision = policy_eval.minimum_decision;
+
+    if let Some(rule_match) = &matched_workspace_rule {
+        match rule_match.decision {
+            GovernanceDecision::Block => minimum_decision = GovernanceDecision::Block,
+            GovernanceDecision::Review => {
+                if minimum_decision != GovernanceDecision::Block {
+                    minimum_decision = GovernanceDecision::Review;
+                }
+            }
+            GovernanceDecision::Allow => {
+                if minimum_decision == GovernanceDecision::Review {
+                    minimum_decision = GovernanceDecision::Allow;
+                }
+            }
+        }
+    }
+
     let mut layer_risks = LayerRiskContributions {
         firewall: firewall_result.risk_score,
         ..Default::default()
@@ -384,6 +480,63 @@ pub async fn execute_pipeline(
     if taint_result.blocked {
         minimum_decision = GovernanceDecision::Block;
         policy_findings.push(format!("taint tracking: {}", taint_result.summary));
+    }
+
+    // ── Plugins ──
+    if !plugin_evaluation.outputs.is_empty() {
+        layer_risks.plugins = plugin_evaluation
+            .outputs
+            .iter()
+            .map(|output| output.result.risk_score)
+            .max()
+            .unwrap_or(0);
+
+        for output in &plugin_evaluation.outputs {
+            for finding in &output.result.findings {
+                policy_findings.push(format!("plugin [{}]: {}", output.plugin_name, finding));
+            }
+
+            if let Some(hint) = output.result.decision_hint.as_deref() {
+                match hint.to_ascii_lowercase().as_str() {
+                    "block" => {
+                        minimum_decision = GovernanceDecision::Block;
+                        policy_findings.push(format!(
+                            "plugin [{}]: decision hint -> block",
+                            output.plugin_name
+                        ));
+                    }
+                    "review" | "human_review" => {
+                        if minimum_decision != GovernanceDecision::Block {
+                            minimum_decision = GovernanceDecision::Review;
+                        }
+                        policy_findings.push(format!(
+                            "plugin [{}]: decision hint -> review",
+                            output.plugin_name
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if layer_risks.plugins >= workspace_policy.threshold_block {
+            minimum_decision = GovernanceDecision::Block;
+            policy_findings.push(format!(
+                "plugin risk: score={} → block",
+                layer_risks.plugins
+            ));
+        } else if layer_risks.plugins >= workspace_policy.threshold_review
+            && minimum_decision != GovernanceDecision::Block
+        {
+            minimum_decision = GovernanceDecision::Review;
+            policy_findings.push(format!(
+                "plugin risk: score={} → review",
+                layer_risks.plugins
+            ));
+        }
+    } else if !plugin_evaluation.errors.is_empty() && minimum_decision != GovernanceDecision::Block
+    {
+        minimum_decision = GovernanceDecision::Review;
     }
 
     // ── Session Graph ──
@@ -525,7 +678,19 @@ pub async fn execute_pipeline(
     let telemetry_json = serde_json::to_value(&telemetry_span).ok();
 
     // Update NHI trust based on outcome (severity-aware)
-    crypto_identity::update_trust_from_decision(&input.agent_id, &decision_str, risk.score);
+    let new_trust =
+        crypto_identity::update_trust_from_decision(&input.agent_id, &decision_str, risk.score);
+
+    // v0.4.0 — persist updated trust score to durable storage (write-behind)
+    if let Some(trust) = new_trust {
+        let nhi_store = state.nhi_store.clone();
+        let aid = input.agent_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = nhi_store.update_trust(&aid, trust).await {
+                tracing::warn!(error = %e, "failed to persist NHI trust update");
+            }
+        });
+    }
 
     let mut result = GovernanceResult {
         trace_id: trace_id.clone(),
@@ -554,6 +719,8 @@ pub async fn execute_pipeline(
             .get_fingerprint(&input.agent_id)
             .and_then(|fp| serde_json::to_value(fp).ok()),
         threat_intel: threat_intel_json,
+        plugin_results: (!plugin_evaluation.outputs.is_empty())
+            .then_some(plugin_evaluation.outputs.clone()),
     };
 
     // Persist audit event

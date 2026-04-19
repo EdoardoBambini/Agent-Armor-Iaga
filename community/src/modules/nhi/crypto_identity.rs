@@ -22,7 +22,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 // ── Types ──
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentIdentity {
     pub agent_id: String,
@@ -193,6 +193,28 @@ pub fn get_identity(agent_id: &str) -> Option<AgentIdentity> {
         .unwrap_or_else(|e| e.into_inner())
         .get(agent_id)
         .map(|s| s.identity.clone())
+}
+
+/// Get the hex-encoded secret key for an agent (used for durable persistence).
+pub fn get_secret_key_hex(agent_id: &str) -> Option<String> {
+    IDENTITIES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(agent_id)
+        .map(|s| hex::encode(&s.secret_key))
+}
+
+/// Hydrate an identity into the in-memory store (used on startup to load from DB).
+pub fn hydrate_identity(identity: AgentIdentity, secret_key_hex: &str) {
+    let secret_key = hex::decode(secret_key_hex).unwrap_or_default();
+    let stored = StoredIdentity {
+        identity: identity.clone(),
+        secret_key,
+    };
+    IDENTITIES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(identity.agent_id.clone(), stored);
 }
 
 pub fn list_identities() -> Vec<AgentIdentity> {

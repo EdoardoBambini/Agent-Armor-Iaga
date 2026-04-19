@@ -8,6 +8,7 @@ pub mod mcp_proxy;
 pub mod mcp_server;
 pub mod modules;
 pub mod pipeline;
+pub mod plugins;
 pub mod server;
 pub mod storage;
 

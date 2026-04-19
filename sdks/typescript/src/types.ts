@@ -1,3 +1,9 @@
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
+export interface JsonObject {
+  [key: string]: JsonValue | undefined;
+}
+
 export type GovernanceDecision = "allow" | "review" | "block";
 export type ActionType = "shell" | "file_read" | "file_write" | "http" | "db_query" | "email" | "custom";
 export type ReviewStatus = "not_required" | "pending" | "approved" | "rejected";
@@ -6,17 +12,19 @@ export type ProtocolKind = "mcp" | "acp" | "a2a" | "http-function" | "unknown";
 export interface ActionDetail {
   type: ActionType;
   toolName: string;
-  payload: Record<string, unknown>;
+  payload: JsonObject;
 }
 
 export interface InspectRequest {
   agentId: string;
   framework: string;
   action: ActionDetail;
+  tenantId?: string;
   workspaceId?: string;
-  protocol?: ProtocolKind;
+  protocol?: ProtocolKind | string;
   requestedSecrets?: string[];
-  metadata?: Record<string, unknown>;
+  metadata?: JsonObject;
+  sessionId?: string;
 }
 
 export interface RiskScore {
@@ -25,23 +33,45 @@ export interface RiskScore {
   reasons: string[];
 }
 
+export interface SchemaValidation {
+  toolName: string;
+  valid: boolean;
+  findings: string[];
+}
+
+export interface SecretPlan {
+  approved: string[];
+  denied: string[];
+}
+
+export interface PluginResult {
+  riskScore: number;
+  findings: string[];
+  decisionHint?: string;
+}
+
+export interface PluginOutput {
+  pluginName: string;
+  pluginVersion: string;
+  executionMs: number;
+  result: PluginResult;
+}
+
 export interface GovernanceResult {
+  traceId: string;
   decision: GovernanceDecision;
   reviewStatus: ReviewStatus;
   risk: RiskScore;
   policyFindings: string[];
-  protocol: ProtocolKind;
+  protocol: ProtocolKind | string;
   reviewRequestId?: string;
-  normalizedPayload: Record<string, unknown>;
-  schemaValidation: {
-    toolName: string;
-    valid: boolean;
-    findings: string[];
-  };
-  secretPlan: {
-    approved: string[];
-    denied: string[];
-  };
+  normalizedPayload: JsonObject;
+  schemaValidation: SchemaValidation;
+  secretPlan: SecretPlan;
+  pluginResults?: PluginOutput[];
+  auditEvent?: JsonObject;
+  profile?: JsonObject;
+  workspacePolicy?: JsonObject;
 }
 
 export interface AuditEvent {
@@ -70,8 +100,32 @@ export interface ReviewRequest {
   updatedAt: string;
 }
 
+export interface HealthResponse {
+  ok: boolean;
+  service: string;
+  mode: string;
+  version: string;
+  authRequired: boolean;
+  openMode: boolean;
+  apiKeysConfigured: boolean;
+}
+
 export interface ArmorClientOptions {
   baseUrl?: string;
   apiKey?: string;
   timeout?: number;
+}
+
+export interface OpenAIAdapterOptions extends ArmorClientOptions {
+  agentId: string;
+  framework?: string;
+  tenantId?: string;
+  workspaceId?: string;
+  sessionId?: string;
+  metadata?: JsonObject;
+}
+
+export interface ArmorMiddlewareOptions extends OpenAIAdapterOptions {
+  toolName?: string;
+  actionType?: ActionType;
 }

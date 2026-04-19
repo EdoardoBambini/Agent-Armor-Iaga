@@ -1,6 +1,6 @@
 [package]
 name = "agent-armor"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "IAGA Agent Armor - zero-trust governance for autonomous AI agents (Community Edition)"
 license = "BUSL-1.1"
@@ -18,7 +18,7 @@ default = ["demo", "sqlite"]
 demo = []
 sqlite = ["sqlx/sqlite"]
 postgres = ["sqlx/postgres"]
-enterprise = []
+plugins = ["wasmtime"]
 
 [dependencies]
 axum = { version = "0.8", features = ["default"] }
@@ -45,7 +45,9 @@ hmac = "0.12"
 tokio-stream = { version = "0.1", features = ["sync"] }
 hex = "0.4"
 futures-core = "0.3"
+wasmtime = { version = "29", optional = true }
 
 [dev-dependencies]
 proptest = "1.6"
 tokio = { version = "1", features = ["full", "test-util"] }
+wat = "1"

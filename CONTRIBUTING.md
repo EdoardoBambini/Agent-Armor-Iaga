@@ -30,7 +30,6 @@ cargo fmt                     # Format code
 - `community/src/dashboard/` — Embedded HTML dashboard
 - `community/src/auth/` — API key auth with Argon2
 - `community/src/events/` — SSE + webhooks
-- `enterprise/` — Enterprise-only features
 - `sdks/` — Python and TypeScript client SDKs
 
 ## How to Contribute

@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 // ── Types ──
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallNode {
     pub id: String,
@@ -26,7 +26,7 @@ pub struct ToolCallNode {
     pub risk_score: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataFlowEdge {
     pub from: String,
@@ -35,7 +35,7 @@ pub struct DataFlowEdge {
     pub taint_propagated: HashSet<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FSAState {
     Idle,
@@ -59,7 +59,8 @@ impl std::fmt::Display for FSAState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionDAG {
     pub session_id: String,
     pub agent_id: String,
@@ -335,6 +336,18 @@ fn save_session(session: &SessionDAG) {
     store.insert(session.session_id.clone(), session.clone());
 }
 
+/// Retrieve a session DAG by ID from the in-memory store.
+pub fn get_session(session_id: &str) -> Option<SessionDAG> {
+    let store = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    store.get(session_id).cloned()
+}
+
+/// Hydrate a session into the in-memory store (used on startup to load from DB).
+pub fn hydrate_session(session: SessionDAG) {
+    let mut store = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    store.insert(session.session_id.clone(), session);
+}
+
 // ── Analysis Result ──
 
 #[derive(Debug, Clone, Serialize)]
@@ -348,6 +361,10 @@ pub struct SessionAnalysisResult {
     pub attacks_detected: Vec<AttackMatch>,
     pub anomaly_score: u32,
     pub anomaly_reasons: Vec<String>,
+    #[serde(skip_serializing)]
+    pub session_call_count: u32,
+    #[serde(skip_serializing)]
+    pub recent_call_timestamps: Vec<u64>,
 }
 
 // ── Core Engine ──
@@ -381,6 +398,8 @@ pub fn add_tool_call_to_session(
                     session.block_count,
                     session.block_reason.as_deref().unwrap_or("unknown")
                 )],
+                session_call_count: session.nodes.len() as u32,
+                recent_call_timestamps: collect_recent_timestamps(&session, 16),
             };
         }
 
@@ -399,6 +418,8 @@ pub fn add_tool_call_to_session(
                     (BLOCK_COOLDOWN_MS - elapsed) as f64 / 1000.0,
                     session.block_reason.as_deref().unwrap_or("unknown")
                 )],
+                session_call_count: session.nodes.len() as u32,
+                recent_call_timestamps: collect_recent_timestamps(&session, 16),
             };
         }
 
@@ -499,6 +520,8 @@ pub fn add_tool_call_to_session(
         attacks_detected: attacks,
         anomaly_score,
         anomaly_reasons,
+        session_call_count: session.nodes.len() as u32,
+        recent_call_timestamps: collect_recent_timestamps(&session, 16),
     }
 }
 
@@ -581,6 +604,26 @@ fn match_attack_signatures(session: &SessionDAG) -> Vec<AttackMatch> {
     matches
 }
 
+fn collect_recent_timestamps(session: &SessionDAG, limit: usize) -> Vec<u64> {
+    let start = session.nodes.len().saturating_sub(limit);
+    session.nodes[start..]
+        .iter()
+        .map(|node| node.timestamp)
+        .collect()
+}
+
+fn is_read_action(action_type: &str) -> bool {
+    matches!(action_type, "file_read" | "db_query")
+}
+
+fn is_egress_action(action_type: &str) -> bool {
+    matches!(action_type, "http" | "email")
+}
+
+fn is_staging_action(action_type: &str) -> bool {
+    matches!(action_type, "shell" | "custom" | "file_write")
+}
+
 fn detect_anomalies(session: &SessionDAG) -> (u32, Vec<String>) {
     let mut score: u32 = 0;
     let mut reasons = Vec::new();
@@ -645,6 +688,58 @@ fn detect_anomalies(session: &SessionDAG) -> (u32, Vec<String>) {
     } else if session.nodes.len() > 25 {
         score += 15;
         reasons.push(format!("deep session: {} calls", session.nodes.len()));
+    }
+
+    // Recent multi-step arcs: low-risk individual calls can still form a dangerous chain.
+    if let Some(last_node) = session.nodes.last() {
+        let recent_window: Vec<&ToolCallNode> = session.nodes.iter().rev().take(5).collect();
+        let prior_nodes = recent_window.iter().skip(1).copied().collect::<Vec<_>>();
+
+        if is_egress_action(&last_node.action_type) {
+            let read_steps = prior_nodes
+                .iter()
+                .filter(|node| is_read_action(&node.action_type))
+                .count();
+            let distinct_read_tools: HashSet<&str> = prior_nodes
+                .iter()
+                .filter(|node| is_read_action(&node.action_type))
+                .map(|node| node.tool_name.as_str())
+                .collect();
+            let staged_processing = prior_nodes
+                .iter()
+                .any(|node| is_staging_action(&node.action_type));
+
+            if read_steps >= 2 {
+                score += 35;
+                reasons.push(format!(
+                    "multi-step collection → egress arc: {} read steps before {}",
+                    read_steps, last_node.action_type
+                ));
+            }
+
+            if distinct_read_tools.len() >= 2 {
+                score += 15;
+                reasons.push(format!(
+                    "fan-in before egress: {} distinct read tools",
+                    distinct_read_tools.len()
+                ));
+            }
+
+            if read_steps >= 1 && staged_processing {
+                score += 20;
+                reasons.push(format!(
+                    "staged processing before egress: read/transform/{} chain",
+                    last_node.action_type
+                ));
+            }
+        }
+
+        if last_node.action_type == "shell"
+            && prior_nodes.iter().any(|node| node.action_type == "http")
+        {
+            score += 25;
+            reasons.push("network-delivered execution arc: recent http followed by shell".into());
+        }
     }
 
     (score.min(100), reasons)
@@ -714,4 +809,77 @@ pub fn prune_stale_sessions(ttl_ms: u64) -> usize {
     let before = store.len();
     store.retain(|_, s| now.saturating_sub(s.last_activity) < ttl_ms);
     before - store.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clear_sessions() {
+        let mut store = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+        store.clear();
+    }
+
+    #[test]
+    fn detects_multi_step_collection_to_egress_arc() {
+        clear_sessions();
+        let session_id = "session-arc-egress";
+
+        let _ = add_tool_call_to_session(
+            session_id,
+            "agent-seq",
+            "fs.readme",
+            "file_read",
+            HashSet::new(),
+        );
+        let _ = add_tool_call_to_session(
+            session_id,
+            "agent-seq",
+            "db.lookup",
+            "db_query",
+            HashSet::from(["local_fs".to_string()]),
+        );
+        let result = add_tool_call_to_session(
+            session_id,
+            "agent-seq",
+            "http.fetch",
+            "http",
+            HashSet::from(["local_fs".to_string(), "db_result".to_string()]),
+        );
+
+        assert!(
+            result
+                .anomaly_reasons
+                .iter()
+                .any(|reason| reason.contains("multi-step collection")),
+            "expected sequence anomaly, got {:?}",
+            result.anomaly_reasons
+        );
+        assert!(result.anomaly_score >= 35);
+    }
+
+    #[test]
+    fn returns_real_session_context_for_pipeline() {
+        clear_sessions();
+        let session_id = "session-context";
+
+        let _ = add_tool_call_to_session(
+            session_id,
+            "agent-seq",
+            "fs.config",
+            "file_read",
+            HashSet::new(),
+        );
+        let result = add_tool_call_to_session(
+            session_id,
+            "agent-seq",
+            "shell.grep",
+            "shell",
+            HashSet::from(["local_fs".to_string()]),
+        );
+
+        assert_eq!(result.session_call_count, 2);
+        assert_eq!(result.recent_call_timestamps.len(), 2);
+        assert!(result.recent_call_timestamps[0] <= result.recent_call_timestamps[1]);
+    }
 }

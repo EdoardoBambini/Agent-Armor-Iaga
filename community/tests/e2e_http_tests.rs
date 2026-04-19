@@ -1,6 +1,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+#[cfg(feature = "plugins")]
+#[path = "support/plugin_test_support.rs"]
+mod plugin_test_support;
+
 use agent_armor::auth::api_keys::generate_api_key;
 use agent_armor::config::env::{AppEnv, NodeEnv, ServiceMode};
 use agent_armor::core::types::RateLimitConfig;
@@ -10,6 +14,7 @@ use agent_armor::events::webhooks::{DeadLetterQueue, WebhookManager};
 use agent_armor::modules::fingerprint::behavioral::BehavioralEngine;
 use agent_armor::modules::rate_limit::limiter::RateLimiter;
 use agent_armor::modules::threat_intel::feed::ThreatFeed;
+use agent_armor::plugins::PluginRegistry;
 use agent_armor::server::app_state::AppState;
 use agent_armor::server::create_server::create_router;
 use agent_armor::storage::sqlite::SqliteStorage;
@@ -37,6 +42,12 @@ impl Drop for TestServer {
 }
 
 async fn spawn_test_server() -> TestServer {
+    spawn_test_server_with_plugin_registry(Arc::new(PluginRegistry::default())).await
+}
+
+async fn spawn_test_server_with_plugin_registry(
+    plugin_registry: Arc<PluginRegistry>,
+) -> TestServer {
     let db_url = format!(
         "sqlite:file:e2e-http-{}?mode=memory&cache=shared",
         Uuid::new_v4()
@@ -71,11 +82,17 @@ async fn spawn_test_server() -> TestServer {
         policy_store: storage.clone(),
         api_key_store: storage.clone(),
         tenant_store: storage.clone(),
+        nhi_store: storage.clone(),
+        session_store: storage.clone(),
+        taint_store: storage.clone(),
+        fingerprint_store: storage.clone(),
+        rate_limit_store: storage.clone(),
         event_bus: EventBus::new(64),
         webhook_manager: Arc::new(WebhookManager::new(Arc::new(DeadLetterQueue::new()))),
         behavioral_engine: Arc::new(BehavioralEngine::new()),
         rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
         threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
+        plugin_registry,
         storage_backend: StorageBackend::Sqlite,
         env: AppEnv {
             port: 0,
@@ -157,6 +174,51 @@ fn blocked_inspect_body() -> Value {
         "requestedSecrets": null,
         "metadata": {
             "sessionId": "e2e-session-1"
+        }
+    })
+}
+
+fn session_sequence_file_read_body(session_id: &str) -> Value {
+    serde_json::json!({
+        "agentId": "openclaw-builder-01",
+        "tenantId": null,
+        "workspaceId": "ws-demo",
+        "framework": "openclaw",
+        "protocol": "mcp",
+        "action": {
+            "type": "file_read",
+            "toolName": "filesystem.read",
+            "payload": {
+                "path": "README.md",
+                "intent": "inspect repository docs"
+            }
+        },
+        "requestedSecrets": null,
+        "metadata": {
+            "sessionId": session_id
+        }
+    })
+}
+
+fn session_sequence_http_body(session_id: &str) -> Value {
+    serde_json::json!({
+        "agentId": "openclaw-builder-01",
+        "tenantId": null,
+        "workspaceId": "ws-demo",
+        "framework": "openclaw",
+        "protocol": "mcp",
+        "action": {
+            "type": "http",
+            "toolName": "http.fetch",
+            "payload": {
+                "method": "POST",
+                "destination": "api.github.com",
+                "intent": "send repository summary"
+            }
+        },
+        "requestedSecrets": null,
+        "metadata": {
+            "sessionId": session_id
         }
     })
 }
@@ -268,6 +330,262 @@ async fn test_http_end_to_end_governance_flow() {
     assert!(
         csv.starts_with("event_id,agent_id,framework,action_type,tool_name,decision,risk_score,review_status,timestamp"),
         "csv export should include the header row"
+    );
+}
+
+#[tokio::test]
+async fn test_http_same_session_double_call_is_correlated() {
+    let server = spawn_test_server().await;
+    let client = auth_client(&server.api_key);
+    let session_id = "e2e-sequence-double-1";
+
+    let first = client
+        .post(format!("{}/v1/inspect", server.base_url()))
+        .json(&session_sequence_file_read_body(session_id))
+        .send()
+        .await
+        .expect("first inspect should succeed");
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_json: Value = first.json().await.expect("first inspect should be JSON");
+    assert_eq!(first_json["decision"], "allow");
+
+    let second = client
+        .post(format!("{}/v1/inspect", server.base_url()))
+        .json(&session_sequence_http_body(session_id))
+        .send()
+        .await
+        .expect("second inspect should succeed");
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_json: Value = second.json().await.expect("second inspect should be JSON");
+    assert_eq!(
+        second_json["decision"], "block",
+        "same-session read -> http should block, got {second_json:?}"
+    );
+    assert!(
+        second_json["risk"]["score"].as_u64().unwrap_or_default() >= 70,
+        "same-session sequence should score high risk, got {:?}",
+        second_json["risk"]["score"]
+    );
+    assert_eq!(second_json["sessionGraph"]["transitionAllowed"], false);
+    assert!(
+        second_json["sessionGraph"]["attacksDetected"]
+            .as_array()
+            .is_some_and(|attacks| attacks
+                .iter()
+                .any(|attack| attack["name"] == "data_exfiltration")),
+        "expected data_exfiltration attack in session graph, got {:?}",
+        second_json["sessionGraph"]
+    );
+
+    let audit = client
+        .get(format!("{}/v1/audit", server.base_url()))
+        .send()
+        .await
+        .expect("audit request should succeed");
+    assert_eq!(audit.status(), StatusCode::OK);
+    let audit_json: Value = audit.json().await.expect("audit response should be JSON");
+    let audit_events = audit_json.as_array().expect("audit should return an array");
+    assert_eq!(
+        audit_events.len(),
+        2,
+        "two same-session inspect requests should both be audited"
+    );
+}
+
+#[tokio::test]
+async fn test_http_plugin_endpoints_are_available() {
+    let server = spawn_test_server().await;
+    let client = auth_client(&server.api_key);
+
+    let list = client
+        .get(format!("{}/v1/plugins", server.base_url()))
+        .send()
+        .await
+        .expect("plugin list should succeed");
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_json: Value = list.json().await.expect("plugin list should be JSON");
+    assert!(list_json["pluginDir"].is_string());
+    assert!(list_json["plugins"].is_array());
+    assert!(list_json["loadErrors"].is_array());
+    assert!(list_json["loadedCount"].is_u64());
+
+    let reload = client
+        .post(format!("{}/v1/plugins/reload", server.base_url()))
+        .send()
+        .await
+        .expect("plugin reload should succeed");
+    assert_eq!(reload.status(), StatusCode::OK);
+    let reload_json: Value = reload.json().await.expect("plugin reload should be JSON");
+    assert!(reload_json["pluginDir"].is_string());
+    assert!(reload_json["plugins"].is_array());
+    assert!(reload_json["loadErrors"].is_array());
+    assert!(reload_json["loadedCount"].is_u64());
+}
+
+#[tokio::test]
+async fn test_http_workspace_rules_persist_and_affect_pipeline() {
+    let server = spawn_test_server().await;
+    let client = auth_client(&server.api_key);
+
+    let rule_body = serde_json::json!({
+        "id": "review-readme-1",
+        "name": "review-readme-access",
+        "priority": 1,
+        "matchCriteria": {
+            "actionType": ["file_read"],
+            "toolName": ["filesystem.read"]
+        },
+        "conditions": {
+            "payloadContains": ["README.md"]
+        },
+        "decision": "review",
+        "reason": "README access requires manual review",
+        "enabled": true
+    });
+
+    let create_rule = client
+        .post(format!("{}/v1/workspaces/ws-demo/rules", server.base_url()))
+        .json(&rule_body)
+        .send()
+        .await
+        .expect("create rule request should succeed");
+    assert_eq!(create_rule.status(), StatusCode::CREATED);
+    let create_rule_json: Value = create_rule
+        .json()
+        .await
+        .expect("create rule response should be JSON");
+    assert_eq!(create_rule_json["status"], "persisted");
+    assert_eq!(create_rule_json["rule"]["id"], "review-readme-1");
+
+    let list_rules = client
+        .get(format!("{}/v1/workspaces/ws-demo/rules", server.base_url()))
+        .send()
+        .await
+        .expect("list rules request should succeed");
+    assert_eq!(list_rules.status(), StatusCode::OK);
+    let list_rules_json: Value = list_rules.json().await.expect("list rules should be JSON");
+    assert_eq!(list_rules_json["count"], 1);
+    assert_eq!(list_rules_json["rules"][0]["id"], "review-readme-1");
+    assert_eq!(list_rules_json["rules"][0]["decision"], "review");
+
+    let inspect = client
+        .post(format!("{}/v1/inspect", server.base_url()))
+        .json(&safe_inspect_body())
+        .send()
+        .await
+        .expect("inspect with persisted rule should succeed");
+    assert_eq!(inspect.status(), StatusCode::OK);
+    let inspect_json: Value = inspect
+        .json()
+        .await
+        .expect("inspect response should be JSON");
+    assert_eq!(
+        inspect_json["decision"], "review",
+        "persisted workspace rule should elevate the otherwise-safe request, got {inspect_json:?}"
+    );
+    assert!(
+        inspect_json["policyFindings"]
+            .as_array()
+            .is_some_and(|findings| findings.iter().any(|finding| {
+                finding
+                    .as_str()
+                    .is_some_and(|finding| finding.contains("README access requires manual review"))
+            })),
+        "expected persisted rule reason in policy findings, got {:?}",
+        inspect_json["policyFindings"]
+    );
+}
+
+#[cfg(feature = "plugins")]
+#[tokio::test]
+async fn test_http_real_wasm_plugin_dir_populates_plugin_results() {
+    let plugin_dir = plugin_test_support::TempPluginDir::new("e2e-http");
+    let plugin_path = plugin_dir.write_review_plugin();
+    let plugin_registry = Arc::new(PluginRegistry::new(plugin_dir.path().to_path_buf()));
+    let snapshot = plugin_registry.reload();
+
+    assert_eq!(snapshot.loaded_count, 1);
+    assert!(
+        snapshot.load_errors.is_empty(),
+        "unexpected plugin load errors: {:?}",
+        snapshot.load_errors
+    );
+
+    let server = spawn_test_server_with_plugin_registry(plugin_registry).await;
+    let client = auth_client(&server.api_key);
+
+    let list = client
+        .get(format!("{}/v1/plugins", server.base_url()))
+        .send()
+        .await
+        .expect("plugin list should succeed");
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_json: Value = list.json().await.expect("plugin list should be JSON");
+    assert_eq!(list_json["loadedCount"], 1);
+    assert_eq!(
+        list_json["plugins"][0]["name"],
+        plugin_test_support::PLUGIN_NAME
+    );
+    assert_eq!(
+        list_json["plugins"][0]["version"],
+        plugin_test_support::PLUGIN_VERSION
+    );
+    assert_eq!(
+        list_json["plugins"][0]["path"],
+        plugin_path.display().to_string()
+    );
+
+    let inspect = client
+        .post(format!("{}/v1/inspect", server.base_url()))
+        .json(&safe_inspect_body())
+        .send()
+        .await
+        .expect("inspect with real WASM plugin should succeed");
+    assert_eq!(inspect.status(), StatusCode::OK);
+    let inspect_json: Value = inspect
+        .json()
+        .await
+        .expect("inspect response should be JSON");
+
+    assert_eq!(
+        inspect_json["decision"], "review",
+        "plugin decision hint should elevate inspect response, got {inspect_json:?}"
+    );
+    assert_eq!(
+        inspect_json["pluginResults"][0]["pluginName"],
+        plugin_test_support::PLUGIN_NAME
+    );
+    assert_eq!(
+        inspect_json["pluginResults"][0]["pluginVersion"],
+        plugin_test_support::PLUGIN_VERSION
+    );
+    assert_eq!(
+        inspect_json["pluginResults"][0]["result"]["riskScore"],
+        plugin_test_support::PLUGIN_RISK_SCORE
+    );
+    assert_eq!(
+        inspect_json["pluginResults"][0]["result"]["decisionHint"],
+        plugin_test_support::PLUGIN_DECISION_HINT
+    );
+    assert!(
+        inspect_json["pluginResults"][0]["result"]["findings"]
+            .as_array()
+            .is_some_and(|findings| findings
+                .iter()
+                .any(|finding| finding == plugin_test_support::PLUGIN_FINDING)),
+        "expected concrete plugin finding in response, got {:?}",
+        inspect_json["pluginResults"]
+    );
+    assert!(
+        inspect_json["policyFindings"]
+            .as_array()
+            .is_some_and(|findings| findings.iter().any(|finding| {
+                finding
+                    .as_str()
+                    .is_some_and(|finding| finding.contains(plugin_test_support::PLUGIN_FINDING))
+            })),
+        "pipeline should merge plugin findings into policy findings, got {:?}",
+        inspect_json["policyFindings"]
     );
 }
 

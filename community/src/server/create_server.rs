@@ -188,6 +188,20 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/threat-intel/stats", get(threat_intel_stats_handler))
         .route("/v1/threat-intel/check", post(threat_intel_check_handler))
+        // v0.4.0: Policy Templates & Rules Engine
+        .route("/v1/templates", get(list_templates_handler))
+        .route("/v1/templates/{template_id}", get(get_template_handler))
+        .route(
+            "/v1/workspaces/{workspace_id}/rules",
+            get(list_workspace_rules_handler),
+        )
+        .route(
+            "/v1/workspaces/{workspace_id}/rules",
+            post(add_workspace_rule_handler),
+        )
+        // v0.4.0: WASM Plugins
+        .route("/v1/plugins", get(list_plugins_handler))
+        .route("/v1/plugins/reload", post(reload_plugins_handler))
         // Demo
         .route("/v1/demo/scenarios", get(demo_scenarios_handler))
         .route("/v1/demo/run-adapter", post(run_adapter_handler))
@@ -1038,4 +1052,116 @@ async fn delete_dlq_handler(
         )
             .into_response()
     }
+}
+
+// ── v0.4.0: Policy Templates ──
+
+async fn list_plugins_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<crate::plugins::PluginRegistrySnapshot> {
+    Json(state.plugin_registry.snapshot())
+}
+
+async fn reload_plugins_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<crate::plugins::PluginRegistrySnapshot> {
+    Json(state.plugin_registry.reload())
+}
+
+async fn list_templates_handler() -> Json<serde_json::Value> {
+    use crate::modules::policy::templates::builtin_templates;
+    let templates: Vec<_> = builtin_templates()
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "templateId": t.template_id,
+                "name": t.name,
+                "description": t.description,
+                "category": t.category,
+                "builtin": t.builtin,
+                "rulesCount": t.rules.len(),
+                "toolsCount": t.workspace.tools.len(),
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "templates": templates, "count": templates.len() }))
+}
+
+async fn get_template_handler(
+    Path(template_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ArmorError> {
+    use crate::modules::policy::templates::get_builtin_template;
+    match get_builtin_template(&template_id) {
+        Some(tpl) => Ok(Json(serde_json::json!({
+            "templateId": tpl.template_id,
+            "name": tpl.name,
+            "description": tpl.description,
+            "category": tpl.category,
+            "builtin": tpl.builtin,
+            "workspace": tpl.workspace,
+            "rules": tpl.rules,
+        }))),
+        None => Err(ArmorError::InvalidRequest(format!(
+            "template '{template_id}' not found"
+        ))),
+    }
+}
+
+// ── v0.4.0: Policy Rules per Workspace ──
+
+async fn list_workspace_rules_handler(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ArmorError> {
+    state
+        .policy_store
+        .get_workspace_policy(&workspace_id)
+        .await?;
+    let rules = state
+        .policy_store
+        .list_workspace_rules(&workspace_id)
+        .await?;
+    Ok(Json(
+        serde_json::json!({ "rules": rules, "count": rules.len() }),
+    ))
+}
+
+async fn add_workspace_rule_handler(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+    Json(rule): Json<crate::modules::policy::rules_engine::PolicyRule>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ArmorError> {
+    if rule.id.trim().is_empty() {
+        return Err(ArmorError::InvalidRequest(
+            "workspace rule id must not be empty".into(),
+        ));
+    }
+    if rule.name.trim().is_empty() {
+        return Err(ArmorError::InvalidRequest(
+            "workspace rule name must not be empty".into(),
+        ));
+    }
+
+    state
+        .policy_store
+        .get_workspace_policy(&workspace_id)
+        .await?;
+    state
+        .policy_store
+        .upsert_workspace_rule(&workspace_id, &rule)
+        .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "status": "persisted",
+            "rule": {
+                "id": rule.id,
+                "name": rule.name,
+                "priority": rule.priority,
+                "decision": rule.decision,
+                "enabled": rule.enabled,
+            }
+        })),
+    ))
 }

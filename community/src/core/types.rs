@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::plugins::PluginOutput;
+
 // ── Tenant ──
 
 /// A tenant owns multiple workspaces. All data is scoped to a tenant.
@@ -237,6 +239,8 @@ pub struct GovernanceResult {
     pub behavioral_fingerprint: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub threat_intel: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_results: Option<Vec<PluginOutput>>,
 }
 
 // ── Review Request ──

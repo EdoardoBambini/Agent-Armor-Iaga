@@ -98,6 +98,12 @@ impl BehavioralEngine {
         store.get(agent_id).cloned()
     }
 
+    /// Hydrate a fingerprint into the in-memory store (used on startup to load from DB).
+    pub fn hydrate_fingerprint(&self, fp: AgentFingerprint) {
+        let mut store = self.fingerprints.write().unwrap_or_else(|e| e.into_inner());
+        store.insert(fp.agent_id.clone(), fp);
+    }
+
     /// List summary fingerprints for all tracked agents.
     pub fn list_fingerprints(&self) -> Vec<AgentFingerprint> {
         let store = self.fingerprints.read().unwrap_or_else(|e| e.into_inner());

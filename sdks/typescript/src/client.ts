@@ -2,9 +2,32 @@ import type {
   ArmorClientOptions,
   AuditEvent,
   GovernanceResult,
+  HealthResponse,
   InspectRequest,
+  JsonObject,
   ReviewRequest,
 } from "./types";
+
+function cleanQuery(query: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(query)
+      .filter(([, value]) => value !== undefined && value !== null)
+      .map(([key, value]) => [key, String(value)])
+  );
+}
+
+function normalizeInspectRequest(request: InspectRequest): JsonObject {
+  const { sessionId, metadata, ...rest } = request;
+  const normalized: JsonObject = { ...(rest as unknown as JsonObject) };
+  const nextMetadata: JsonObject = { ...(metadata ?? {}) };
+  if (sessionId) {
+    nextMetadata.sessionId = sessionId;
+  }
+  if (Object.keys(nextMetadata).length > 0) {
+    normalized.metadata = nextMetadata;
+  }
+  return normalized;
+}
 
 export class ArmorClient {
   private baseUrl: string;
@@ -16,69 +39,443 @@ export class ArmorClient {
     this.timeout = options.timeout ?? 10000;
     this.headers = { "Content-Type": "application/json" };
     if (options.apiKey) {
-      this.headers["Authorization"] = `Bearer ${options.apiKey}`;
+      this.headers.Authorization = `Bearer ${options.apiKey}`;
     }
   }
 
   async inspect(request: InspectRequest): Promise<GovernanceResult> {
-    const resp = await this.fetch("/v1/inspect", {
+    return this.request<GovernanceResult>("/v1/inspect", {
       method: "POST",
-      body: JSON.stringify(request),
+      body: JSON.stringify(normalizeInspectRequest(request)),
     });
-    return resp as GovernanceResult;
   }
 
   async listAudit(): Promise<AuditEvent[]> {
-    return this.fetch("/v1/audit") as Promise<AuditEvent[]>;
+    return this.request<AuditEvent[]>("/v1/audit");
+  }
+
+  async exportAudit(query: {
+    format?: "json" | "csv";
+    tenantId?: string;
+    agentId?: string;
+    decision?: string;
+    fromDate?: string;
+    toDate?: string;
+    limit?: number;
+  } = {}): Promise<AuditEvent[] | string> {
+    const format = query.format ?? "json";
+    const response = await this.fetchResponse("/v1/audit/export", undefined, {
+      format,
+      tenant_id: query.tenantId,
+      agent_id: query.agentId,
+      decision: query.decision,
+      from_date: query.fromDate,
+      to_date: query.toDate,
+      limit: query.limit,
+    });
+    if (format === "csv") {
+      return response.text();
+    }
+    return (await response.json()) as AuditEvent[];
+  }
+
+  async getStats(): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/audit/stats");
+  }
+
+  async getAnalytics(agentId?: string): Promise<JsonObject[]> {
+    if (agentId) {
+      return this.request<JsonObject[]>(`/v1/analytics/agents/${agentId}`);
+    }
+    return this.request<JsonObject[]>("/v1/analytics/agents");
   }
 
   async listReviews(): Promise<ReviewRequest[]> {
-    return this.fetch("/v1/reviews") as Promise<ReviewRequest[]>;
+    return this.request<ReviewRequest[]>("/v1/reviews");
   }
 
   async resolveReview(
     reviewId: string,
     status: "approved" | "rejected"
   ): Promise<ReviewRequest> {
-    return this.fetch(`/v1/reviews/${reviewId}`, {
+    return this.request<ReviewRequest>(`/v1/reviews/${reviewId}`, {
       method: "POST",
       body: JSON.stringify({ status }),
-    }) as Promise<ReviewRequest>;
+    });
   }
 
-  async health(): Promise<{ ok: boolean; service: string; mode: string }> {
-    return this.fetch("/health") as Promise<any>;
+  async listProfiles(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/profiles");
   }
 
-  /**
-   * Subscribe to real-time governance events via SSE.
-   * Returns an EventSource instance.
-   */
+  async getProfile(agentId: string): Promise<JsonObject> {
+    return this.request<JsonObject>(`/v1/profiles/${agentId}`);
+  }
+
+  async createProfile(profile: JsonObject): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/profiles", {
+      method: "POST",
+      body: JSON.stringify(profile),
+    });
+  }
+
+  async updateProfile(profile: JsonObject): Promise<JsonObject> {
+    return this.request<JsonObject>(`/v1/profiles/${String(profile.agentId)}`, {
+      method: "PUT",
+      body: JSON.stringify(profile),
+    });
+  }
+
+  async deleteProfile(agentId: string): Promise<void> {
+    await this.request<void>(`/v1/profiles/${agentId}`, { method: "DELETE" });
+  }
+
+  async listWorkspaces(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/workspaces");
+  }
+
+  async getWorkspace(workspaceId: string): Promise<JsonObject> {
+    return this.request<JsonObject>(`/v1/workspaces/${workspaceId}`);
+  }
+
+  async createWorkspace(workspace: JsonObject): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/workspaces", {
+      method: "POST",
+      body: JSON.stringify(workspace),
+    });
+  }
+
+  async updateWorkspace(workspace: JsonObject): Promise<JsonObject> {
+    return this.request<JsonObject>(`/v1/workspaces/${String(workspace.workspaceId)}`, {
+      method: "PUT",
+      body: JSON.stringify(workspace),
+    });
+  }
+
+  async deleteWorkspace(workspaceId: string): Promise<void> {
+    await this.request<void>(`/v1/workspaces/${workspaceId}`, { method: "DELETE" });
+  }
+
+  async listKeys(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/auth/keys");
+  }
+
+  async createKey(label: string): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/auth/keys", {
+      method: "POST",
+      body: JSON.stringify({ label }),
+    });
+  }
+
+  async deleteKey(keyId: string): Promise<void> {
+    await this.request<void>(`/v1/auth/keys/${keyId}`, { method: "DELETE" });
+  }
+
+  async listWebhooks(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/webhooks");
+  }
+
+  async registerWebhook(
+    url: string,
+    secret: string,
+    eventFilter: string[] = []
+  ): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/webhooks", {
+      method: "POST",
+      body: JSON.stringify({ url, secret, eventFilter }),
+    });
+  }
+
+  async deleteWebhook(webhookId: string): Promise<void> {
+    await this.request<void>(`/v1/webhooks/${webhookId}`, { method: "DELETE" });
+  }
+
+  async getDlq(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/webhooks/dlq");
+  }
+
+  async retryDlq(entryId: string): Promise<JsonObject> {
+    return this.request<JsonObject>(`/v1/webhooks/dlq/${entryId}/retry`, {
+      method: "POST",
+    });
+  }
+
+  async deleteDlq(entryId: string): Promise<void> {
+    await this.request<void>(`/v1/webhooks/dlq/${entryId}`, { method: "DELETE" });
+  }
+
+  async listSessions(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/sessions");
+  }
+
+  async getSessionMetrics(sessionId: string): Promise<JsonObject> {
+    return this.request<JsonObject>(`/v1/sessions/${sessionId}/metrics`);
+  }
+
+  async listIdentities(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/nhi/identities");
+  }
+
+  async registerIdentity(input: {
+    agentId: string;
+    workspaceId?: string;
+    capabilities?: string[];
+  }): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/nhi/identities", {
+      method: "POST",
+      body: JSON.stringify({
+        agentId: input.agentId,
+        workspaceId: input.workspaceId,
+        capabilities: input.capabilities ?? [],
+      }),
+    });
+  }
+
+  async attest(agentId: string, challenge: string): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/nhi/attest", {
+      method: "POST",
+      body: JSON.stringify({ agentId, challenge }),
+    });
+  }
+
+  async createChallenge(agentId: string): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/nhi/challenge", {
+      method: "POST",
+      body: JSON.stringify({ agentId }),
+    });
+  }
+
+  async verifyAttestation(input: {
+    agentId: string;
+    challengeId: string;
+    signature: string;
+  }): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/nhi/verify", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async issueToken(input: {
+    agentId: string;
+    capabilities: string[];
+    ttlSeconds?: number;
+  }): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/nhi/tokens", {
+      method: "POST",
+      body: JSON.stringify({
+        agentId: input.agentId,
+        capabilities: input.capabilities,
+        ttlSeconds: input.ttlSeconds ?? 3600,
+      }),
+    });
+  }
+
+  async getRiskWeights(): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/risk/weights");
+  }
+
+  async submitFeedback(feedback: string): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/risk/feedback", {
+      method: "POST",
+      body: JSON.stringify({ feedback }),
+    });
+  }
+
+  async listPendingSandbox(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/sandbox/pending");
+  }
+
+  async approveSandbox(sandboxId: string): Promise<JsonObject> {
+    return this.request<JsonObject>(`/v1/sandbox/${sandboxId}/approve`, {
+      method: "POST",
+    });
+  }
+
+  async rejectSandbox(sandboxId: string): Promise<JsonObject> {
+    return this.request<JsonObject>(`/v1/sandbox/${sandboxId}/reject`, {
+      method: "POST",
+    });
+  }
+
+  async verifyPolicy(workspaceId: string): Promise<JsonObject> {
+    return this.request<JsonObject>(`/v1/policy/verify/${workspaceId}`);
+  }
+
+  async scanResponse(request: JsonObject): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/response/scan", {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+  }
+
+  async getPatterns(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/response/patterns");
+  }
+
+  async scanFirewall(text: string): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/firewall/scan", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+  }
+
+  async getFirewallStats(): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/firewall/stats");
+  }
+
+  async listSpans(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/telemetry/spans");
+  }
+
+  async getMetrics(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/telemetry/metrics");
+  }
+
+  async exportTelemetry(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/telemetry/export");
+  }
+
+  async listFingerprints(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/fingerprint");
+  }
+
+  async getFingerprint(agentId: string): Promise<JsonObject> {
+    return this.request<JsonObject>(`/v1/fingerprint/${agentId}`);
+  }
+
+  async getStatus(agentId: string): Promise<JsonObject> {
+    return this.request<JsonObject>(`/v1/rate-limit/status/${agentId}`);
+  }
+
+  async getConfig(): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/rate-limit/config");
+  }
+
+  async setConfig(config: JsonObject): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/rate-limit/config", {
+      method: "POST",
+      body: JSON.stringify(config),
+    });
+  }
+
+  async listIndicators(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/threat-intel/indicators");
+  }
+
+  async addIndicator(indicator: JsonObject): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/threat-intel/indicators", {
+      method: "POST",
+      body: JSON.stringify(indicator),
+    });
+  }
+
+  async deleteIndicator(indicatorId: string): Promise<void> {
+    await this.request<void>(`/v1/threat-intel/indicators/${indicatorId}`, {
+      method: "DELETE",
+    });
+  }
+
+  async getThreatIntelStats(): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/threat-intel/stats");
+  }
+
+  async checkThreats(content: string): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/threat-intel/check", {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    });
+  }
+
+  async listTemplates(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/templates");
+  }
+
+  async getTemplate(templateId: string): Promise<JsonObject> {
+    return this.request<JsonObject>(`/v1/templates/${templateId}`);
+  }
+
+  async listWorkspaceRules(workspaceId: string): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>(`/v1/workspaces/${workspaceId}/rules`);
+  }
+
+  async addWorkspaceRule(workspaceId: string, rule: JsonObject): Promise<JsonObject> {
+    return this.request<JsonObject>(`/v1/workspaces/${workspaceId}/rules`, {
+      method: "POST",
+      body: JSON.stringify(rule),
+    });
+  }
+
+  async listPlugins(): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/plugins");
+  }
+
+  async reloadPlugins(): Promise<JsonObject> {
+    return this.request<JsonObject>("/v1/plugins/reload", { method: "POST" });
+  }
+
+  async listDemoScenarios(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/demo/scenarios");
+  }
+
+  async runDemoAdapter(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/demo/run-adapter", { method: "POST" });
+  }
+
+  async health(): Promise<HealthResponse> {
+    return this.request<HealthResponse>("/health");
+  }
+
   eventStream(): EventSource {
-    const url = `${this.baseUrl}/v1/events/stream`;
-    return new EventSource(url);
+    return new EventSource(this.buildUrl("/v1/events/stream"));
   }
 
-  private async fetch(path: string, init?: RequestInit): Promise<unknown> {
+  private buildUrl(path: string, query?: Record<string, unknown>): string {
+    const url = new URL(path, `${this.baseUrl}/`);
+    if (query) {
+      for (const [key, value] of Object.entries(cleanQuery(query))) {
+        url.searchParams.set(key, value);
+      }
+    }
+    return url.toString();
+  }
+
+  private async fetchResponse(
+    path: string,
+    init?: RequestInit,
+    query?: Record<string, unknown>
+  ): Promise<Response> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeout);
 
     try {
-      const resp = await globalThis.fetch(`${this.baseUrl}${path}`, {
+      const response = await globalThis.fetch(this.buildUrl(path, query), {
         ...init,
-        headers: { ...this.headers, ...(init?.headers as Record<string, string>) },
+        headers: { ...this.headers, ...(init?.headers as Record<string, string> | undefined) },
         signal: controller.signal,
       });
 
-      if (!resp.ok) {
-        const body = await resp.text().catch(() => "");
-        throw new ArmorApiError(resp.status, body, path);
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new ArmorApiError(response.status, body, path);
       }
 
-      return resp.json();
+      return response;
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  private async request<T>(
+    path: string,
+    init?: RequestInit,
+    query?: Record<string, unknown>
+  ): Promise<T> {
+    const response = await this.fetchResponse(path, init, query);
+    if (response.status === 204) {
+      return undefined as T;
+    }
+    return (await response.json()) as T;
   }
 }
 
@@ -93,10 +490,6 @@ export class ArmorApiError extends Error {
   }
 }
 
-/**
- * Governance wrapper: checks a tool call before execution.
- * Throws ArmorBlockedError if blocked or needs review.
- */
 export async function governed<T>(
   client: ArmorClient,
   request: InspectRequest,
@@ -111,13 +504,13 @@ export async function governed<T>(
     throw new ArmorReviewError(result);
   }
 
-  return fn();
+  return await fn();
 }
 
 export class ArmorBlockedError extends Error {
   constructor(public readonly result: GovernanceResult) {
     super(
-      `Tool '${result.risk.reasons.join(", ")}' blocked by Agent Armor (risk: ${result.risk.score})`
+      `Tool blocked by Agent Armor (risk=${result.risk.score}): ${result.risk.reasons.join(", ")}`
     );
     this.name = "ArmorBlockedError";
   }
@@ -126,7 +519,7 @@ export class ArmorBlockedError extends Error {
 export class ArmorReviewError extends Error {
   constructor(public readonly result: GovernanceResult) {
     super(
-      `Tool requires review (reviewId: ${result.reviewRequestId}, risk: ${result.risk.score})`
+      `Tool requires review (reviewId=${result.reviewRequestId}, risk=${result.risk.score})`
     );
     this.name = "ArmorReviewError";
   }

@@ -11,6 +11,7 @@ use agent_armor::events::webhooks::{self, WebhookManager};
 use agent_armor::modules::fingerprint::behavioral::BehavioralEngine;
 use agent_armor::modules::rate_limit::limiter::RateLimiter;
 use agent_armor::modules::threat_intel::feed::ThreatFeed;
+use agent_armor::plugins::{LoadedPlugin, PluginRegistry};
 use agent_armor::server::app_state::AppState;
 use agent_armor::server::create_server::create_router;
 #[cfg(feature = "postgres")]
@@ -18,7 +19,8 @@ use agent_armor::storage::postgres::PostgresStorage;
 #[cfg(feature = "sqlite")]
 use agent_armor::storage::sqlite::SqliteStorage;
 use agent_armor::storage::traits::{
-    ApiKeyStore, AuditStore, PolicyStore, ReviewStore, StorageBackend, TenantStore,
+    ApiKeyStore, AuditStore, FingerprintStore, NhiStore, PolicyStore, RateLimitStore, ReviewStore,
+    SessionStore, StorageBackend, TaintStore, TenantStore,
 };
 
 struct StorageBundle {
@@ -27,6 +29,12 @@ struct StorageBundle {
     policy_store: Arc<dyn PolicyStore>,
     api_key_store: Arc<dyn ApiKeyStore>,
     tenant_store: Arc<dyn TenantStore>,
+    // v0.4.0 — Durable State stores
+    nhi_store: Arc<dyn NhiStore>,
+    session_store: Arc<dyn SessionStore>,
+    taint_store: Arc<dyn TaintStore>,
+    fingerprint_store: Arc<dyn FingerprintStore>,
+    rate_limit_store: Arc<dyn RateLimitStore>,
     storage_backend: StorageBackend,
 }
 
@@ -54,7 +62,12 @@ async fn init_storage_bundle(db_url: &str) -> Result<StorageBundle, String> {
                     review_store: storage.clone(),
                     policy_store: storage.clone(),
                     api_key_store: storage.clone(),
-                    tenant_store: storage,
+                    tenant_store: storage.clone(),
+                    nhi_store: storage.clone(),
+                    session_store: storage.clone(),
+                    taint_store: storage.clone(),
+                    fingerprint_store: storage.clone(),
+                    rate_limit_store: storage,
                     storage_backend: StorageBackend::Sqlite,
                 })
             }
@@ -78,7 +91,12 @@ async fn init_storage_bundle(db_url: &str) -> Result<StorageBundle, String> {
                     review_store: storage.clone(),
                     policy_store: storage.clone(),
                     api_key_store: storage.clone(),
-                    tenant_store: storage,
+                    tenant_store: storage.clone(),
+                    nhi_store: storage.clone(),
+                    session_store: storage.clone(),
+                    taint_store: storage.clone(),
+                    fingerprint_store: storage.clone(),
+                    rate_limit_store: storage,
                     storage_backend: StorageBackend::Postgres,
                 })
             }
@@ -126,6 +144,12 @@ enum Commands {
     Validate {
         /// Path to policy config file (YAML or JSON)
         config: String,
+    },
+
+    /// Inspect and validate WASM plugins
+    Plugins {
+        #[command(subcommand)]
+        command: PluginCommands,
     },
 
     /// Run database migrations
@@ -186,6 +210,30 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum PluginCommands {
+    /// List plugins discovered in a directory
+    List {
+        /// Plugin directory (defaults to AGENT_ARMOR_PLUGIN_DIR or ./plugins)
+        #[arg(long)]
+        dir: Option<String>,
+
+        /// Output format: json or table
+        #[arg(short, long, default_value = "table")]
+        format: String,
+    },
+
+    /// Validate a single WASM plugin file
+    Validate {
+        /// Path to the plugin .wasm file
+        path: String,
+
+        /// Output format: json or table
+        #[arg(short, long, default_value = "table")]
+        format: String,
+    },
+}
+
 #[tokio::main]
 async fn main() {
     let runtime_env = load_env();
@@ -222,6 +270,14 @@ async fn main() {
         Some(Commands::Validate { config }) => {
             cmd_validate(&config);
         }
+        Some(Commands::Plugins { command }) => match command {
+            PluginCommands::List { dir, format } => {
+                cmd_plugins_list(dir.as_deref(), &format);
+            }
+            PluginCommands::Validate { path, format } => {
+                cmd_plugins_validate(&path, &format);
+            }
+        },
         Some(Commands::Migrate) => {
             cmd_migrate(&db_url).await;
         }
@@ -341,22 +397,131 @@ async fn cmd_serve(db_url: &str, port_override: Option<u16>, seed_demo: bool) {
     )));
     let behavioral_engine = Arc::new(BehavioralEngine::new());
 
+    // ═══════════════════════════════════════════════════════════════
+    // v0.4.0 — Startup hydration: load persisted state into memory
+    // ═══════════════════════════════════════════════════════════════
+    {
+        use agent_armor::modules::nhi::crypto_identity;
+        use agent_armor::modules::session_graph::session_dag;
+        use agent_armor::modules::taint::taint_tracker;
+
+        // Hydrate NHI identities
+        match storage.nhi_store.list_identities().await {
+            Ok(identities) => {
+                let count = identities.len();
+                for identity in identities {
+                    let secret = storage
+                        .nhi_store
+                        .get_secret_key_hex(&identity.agent_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default();
+                    crypto_identity::hydrate_identity(identity, &secret);
+                }
+                if count > 0 {
+                    tracing::info!(count, "hydrated NHI identities from DB");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to hydrate NHI identities"),
+        }
+
+        // Hydrate session graphs
+        match storage.session_store.list_sessions().await {
+            Ok(sessions) => {
+                let count = sessions.len();
+                for session in sessions {
+                    session_dag::hydrate_session(session);
+                }
+                if count > 0 {
+                    tracing::info!(count, "hydrated session graphs from DB");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to hydrate session graphs"),
+        }
+
+        // Hydrate taint labels (iterate sessions from DB)
+        // Note: taint sessions are already loaded above, but we also
+        // need to load taint labels from their dedicated store
+        match storage.session_store.list_sessions().await {
+            Ok(sessions) => {
+                for session in &sessions {
+                    match storage
+                        .taint_store
+                        .get_session_taint(&session.session_id)
+                        .await
+                    {
+                        Ok(labels) if !labels.is_empty() => {
+                            taint_tracker::hydrate_session_taint(&session.session_id, labels);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to hydrate taint labels"),
+        }
+
+        // Hydrate behavioral fingerprints
+        match storage.fingerprint_store.list_fingerprints().await {
+            Ok(fingerprints) => {
+                let count = fingerprints.len();
+                for fp in fingerprints {
+                    behavioral_engine.hydrate_fingerprint(fp);
+                }
+                if count > 0 {
+                    tracing::info!(count, "hydrated behavioral fingerprints from DB");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to hydrate fingerprints"),
+        }
+
+        // Hydrate rate limit config
+        match storage.rate_limit_store.load_config().await {
+            Ok(Some(_config)) => {
+                tracing::info!("hydrated rate limit config from DB");
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "failed to hydrate rate limit config"),
+        }
+    }
+
     // Spawn webhook delivery worker
     webhooks::spawn_webhook_worker(event_bus.clone(), webhook_manager.clone());
 
     // Spawn periodic TTL cleanup for session/taint data (every 5 minutes)
-    tokio::spawn(async {
+    // v0.4.0 — also prunes durable storage in parallel
+    let cleanup_nhi = storage.nhi_store.clone();
+    let cleanup_session = storage.session_store.clone();
+    let cleanup_taint = storage.taint_store.clone();
+    tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(300);
         let ttl = std::time::Duration::from_secs(3600); // 1 hour TTL
         let ttl_ms = 3_600_000u64;
         loop {
             tokio::time::sleep(interval).await;
+
+            // Prune in-memory state
             let taint_pruned =
                 agent_armor::modules::taint::taint_tracker::prune_stale_sessions(ttl);
             let session_pruned =
                 agent_armor::modules::session_graph::session_dag::prune_stale_sessions(ttl_ms);
             let challenge_pruned =
                 agent_armor::modules::nhi::crypto_identity::prune_expired_challenges();
+
+            // Prune durable storage (best-effort, log errors)
+            let _ = cleanup_nhi
+                .prune_expired_challenges()
+                .await
+                .map_err(|e| tracing::warn!(error = %e, "DB prune: NHI challenges"));
+            let _ = cleanup_session
+                .prune_stale_sessions(ttl_ms)
+                .await
+                .map_err(|e| tracing::warn!(error = %e, "DB prune: sessions"));
+            let _ = cleanup_taint
+                .prune_stale_sessions(3600)
+                .await
+                .map_err(|e| tracing::warn!(error = %e, "DB prune: taint"));
+
             if taint_pruned > 0 || session_pruned > 0 || challenge_pruned > 0 {
                 tracing::debug!(
                     taint_pruned,
@@ -368,7 +533,15 @@ async fn cmd_serve(db_url: &str, port_override: Option<u16>, seed_demo: bool) {
         }
     });
 
-    let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
+    // Load rate limit config from DB (if persisted), otherwise use defaults
+    let rate_limit_config = storage
+        .rate_limit_store
+        .load_config()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let rate_limiter = Arc::new(RateLimiter::new(rate_limit_config));
     let threat_feed = Arc::new(ThreatFeed::with_builtin_indicators());
     tracing::info!(
         indicators = threat_feed.get_stats().total_indicators,
@@ -381,11 +554,17 @@ async fn cmd_serve(db_url: &str, port_override: Option<u16>, seed_demo: bool) {
         policy_store: storage.policy_store,
         api_key_store: storage.api_key_store,
         tenant_store: storage.tenant_store,
+        nhi_store: storage.nhi_store,
+        session_store: storage.session_store,
+        taint_store: storage.taint_store,
+        fingerprint_store: storage.fingerprint_store,
+        rate_limit_store: storage.rate_limit_store,
         event_bus,
         webhook_manager,
         behavioral_engine,
         rate_limiter,
         threat_feed,
+        plugin_registry: Arc::new(PluginRegistry::default()),
         storage_backend: storage.storage_backend,
         env: app_env,
     });
@@ -484,6 +663,11 @@ async fn cmd_inspect(source: &str, db_url: &str) -> i32 {
         policy_store: storage.policy_store,
         api_key_store: storage.api_key_store,
         tenant_store: storage.tenant_store,
+        nhi_store: storage.nhi_store,
+        session_store: storage.session_store,
+        taint_store: storage.taint_store,
+        fingerprint_store: storage.fingerprint_store,
+        rate_limit_store: storage.rate_limit_store,
         event_bus: EventBus::new(16),
         webhook_manager: Arc::new(WebhookManager::new(Arc::new(
             webhooks::DeadLetterQueue::new(),
@@ -491,6 +675,7 @@ async fn cmd_inspect(source: &str, db_url: &str) -> i32 {
         behavioral_engine: Arc::new(BehavioralEngine::new()),
         rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
         threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
+        plugin_registry: Arc::new(PluginRegistry::default()),
         storage_backend: storage.storage_backend,
         env: load_env(),
     });
@@ -630,6 +815,78 @@ fn cmd_validate(config_path: &str) {
         }
         Err(e) => {
             eprintln!("Invalid config: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+// ── plugins ──
+
+fn cmd_plugins_list(dir: Option<&str>, format: &str) {
+    let registry = dir
+        .map(|plugin_dir| PluginRegistry::new(plugin_dir.into()))
+        .unwrap_or_else(PluginRegistry::from_env);
+    let snapshot = registry.reload();
+
+    match format {
+        "json" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&snapshot)
+                    .unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {e}\"}}"))
+            );
+        }
+        "table" => {
+            println!("Plugin directory: {}", snapshot.plugin_dir);
+            println!("Loaded plugins: {}", snapshot.loaded_count);
+
+            if snapshot.plugins.is_empty() {
+                println!("No plugins loaded.");
+            } else {
+                println!();
+                for plugin in &snapshot.plugins {
+                    println!("- {} {} ({})", plugin.name, plugin.version, plugin.path);
+                }
+            }
+
+            if !snapshot.load_errors.is_empty() {
+                println!();
+                println!("Load errors:");
+                for error in &snapshot.load_errors {
+                    println!("- {}: {}", error.path, error.error);
+                }
+            }
+        }
+        _ => {
+            eprintln!("Unknown format: {format}. Use 'json' or 'table'.");
+            process::exit(1);
+        }
+    }
+}
+
+fn cmd_plugins_validate(path: &str, format: &str) {
+    let manifest = LoadedPlugin::validate(std::path::Path::new(path)).unwrap_or_else(|e| {
+        eprintln!("Invalid plugin: {e}");
+        process::exit(1);
+    });
+
+    match format {
+        "json" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&manifest)
+                    .unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {e}\"}}"))
+            );
+        }
+        "table" => {
+            println!("Plugin is valid.");
+            println!("  Name:    {}", manifest.name);
+            println!("  Version: {}", manifest.version);
+            println!("  Path:    {}", manifest.path);
+            println!("  Loaded:  {}", manifest.loaded);
+        }
+        _ => {
+            eprintln!("Unknown format: {format}. Use 'json' or 'table'.");
             process::exit(1);
         }
     }
@@ -893,11 +1150,17 @@ async fn cmd_proxy(db_url: &str, agent_id: &str, command: &str, args: Vec<String
         policy_store: storage.policy_store,
         api_key_store: storage.api_key_store,
         tenant_store: storage.tenant_store,
+        nhi_store: storage.nhi_store,
+        session_store: storage.session_store,
+        taint_store: storage.taint_store,
+        fingerprint_store: storage.fingerprint_store,
+        rate_limit_store: storage.rate_limit_store,
         event_bus,
         webhook_manager,
         behavioral_engine: Arc::new(BehavioralEngine::new()),
         rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
         threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
+        plugin_registry: Arc::new(PluginRegistry::default()),
         storage_backend: storage.storage_backend,
         env: load_env(),
     });
@@ -938,11 +1201,17 @@ async fn cmd_mcp_server(db_url: &str, seed_demo: bool) {
         policy_store: storage.policy_store,
         api_key_store: storage.api_key_store,
         tenant_store: storage.tenant_store,
+        nhi_store: storage.nhi_store,
+        session_store: storage.session_store,
+        taint_store: storage.taint_store,
+        fingerprint_store: storage.fingerprint_store,
+        rate_limit_store: storage.rate_limit_store,
         event_bus,
         webhook_manager,
         behavioral_engine: Arc::new(BehavioralEngine::new()),
         rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
         threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
+        plugin_registry: Arc::new(PluginRegistry::default()),
         storage_backend: storage.storage_backend,
         env: load_env(),
     });
