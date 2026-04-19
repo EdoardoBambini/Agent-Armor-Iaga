@@ -45,7 +45,7 @@ hmac = "0.12"
 tokio-stream = { version = "0.1", features = ["sync"] }
 hex = "0.4"
 futures-core = "0.3"
-wasmtime = { version = "29", optional = true }
+wasmtime = { version = "36.0.7", optional = true }
 
 [dev-dependencies]
 proptest = "1.6"
