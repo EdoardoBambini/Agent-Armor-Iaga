@@ -57,7 +57,10 @@ fn parse_membership_in_and_not_in() {
     if let Expr::Membership { not, .. } = &p.policies[0].when {
         assert!(*not);
     } else {
-        panic!("expected Membership at the root of `when`, got {:?}", p.policies[0].when);
+        panic!(
+            "expected Membership at the root of `when`, got {:?}",
+            p.policies[0].when
+        );
     }
 }
 
@@ -139,10 +142,7 @@ fn parse_preserves_bin_op_associativity() {
 fn parse_handles_unary_not_prefix() {
     let src = r#"policy "p" { when not action.trusted then block }"#;
     let p = compile(src).expect("parse");
-    assert!(matches!(
-        p.policies[0].when,
-        Expr::Unary(UnOp::Not, _)
-    ));
+    assert!(matches!(p.policies[0].when, Expr::Unary(UnOp::Not, _)));
 }
 
 #[test]

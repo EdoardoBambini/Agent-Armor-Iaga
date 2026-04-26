@@ -177,11 +177,7 @@ pub fn eval_expr(e: &Expr, ctx: &Context, budget: &mut EvalBudget) -> Result<Val
                         ))
                     }
                 },
-                _ => {
-                    return Err(AplError::Eval(
-                        "`in` rhs must be list or string".into(),
-                    ))
-                }
+                _ => return Err(AplError::Eval("`in` rhs must be list or string".into())),
             };
             Ok(Value::Bool(if *not { !contains } else { contains }))
         }
@@ -240,12 +236,7 @@ fn cmp_values(op: BinOp, a: &Value, b: &Value) -> Result<Value> {
         (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y),
         (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)),
         (Value::Str(x), Value::Str(y)) => x.partial_cmp(y),
-        _ => {
-            return Err(AplError::Eval(format!(
-                "cannot compare {} and {}",
-                a, b
-            )))
-        }
+        _ => return Err(AplError::Eval(format!("cannot compare {} and {}", a, b))),
     };
     let ord = ord.ok_or_else(|| AplError::Eval("NaN comparison".into()))?;
     Ok(Value::Bool(match op {
@@ -290,7 +281,12 @@ fn json_to_value(v: &Json) -> Value {
     }
 }
 
-fn eval_builtin(name: &str, args: &[Expr], ctx: &Context, budget: &mut EvalBudget) -> Result<Value> {
+fn eval_builtin(
+    name: &str,
+    args: &[Expr],
+    ctx: &Context,
+    budget: &mut EvalBudget,
+) -> Result<Value> {
     let evaluated: Result<Vec<Value>> = args.iter().map(|a| eval_expr(a, ctx, budget)).collect();
     let evaluated = evaluated?;
     match (name, evaluated.as_slice()) {

@@ -3,8 +3,7 @@
 #![cfg(feature = "sqlite")]
 
 use armor_receipts::{
-    chain_link, ChainStatus, ReceiptBody, ReceiptSigner, ReceiptStore, SqliteReceiptStore,
-    Verdict,
+    chain_link, ChainStatus, ReceiptBody, ReceiptSigner, ReceiptStore, SqliteReceiptStore, Verdict,
 };
 
 async fn make_store() -> (SqliteReceiptStore, ReceiptSigner, tempfile::TempDir) {
@@ -56,7 +55,11 @@ async fn append_and_read_back_full_chain() {
         assert_eq!(r.body.seq, i as u64);
     }
 
-    let head = store.head("run-sqlite").await.expect("head").expect("head some");
+    let head = store
+        .head("run-sqlite")
+        .await
+        .expect("head")
+        .expect("head some");
     assert_eq!(head.body.seq, 9);
 }
 
@@ -105,7 +108,10 @@ async fn verify_chain_detects_tamper_on_persisted_data() {
     .await
     .expect("tamper body_json");
 
-    let status = store.verify_chain("run-sqlite").await.expect("verify returns");
+    let status = store
+        .verify_chain("run-sqlite")
+        .await
+        .expect("verify returns");
     match status {
         ChainStatus::Broken { seq, reason: _ } => {
             assert_eq!(seq, 2, "break must be at tampered receipt");
@@ -136,7 +142,10 @@ async fn list_runs_returns_summary() {
 #[tokio::test]
 async fn unknown_run_returns_error_on_verify() {
     let (store, _signer, _dir) = make_store().await;
-    let err = store.verify_chain("does-not-exist").await.expect_err("must error");
+    let err = store
+        .verify_chain("does-not-exist")
+        .await
+        .expect_err("must error");
     let msg = format!("{}", err);
     assert!(msg.contains("unknown run_id"), "unexpected: {}", msg);
 }

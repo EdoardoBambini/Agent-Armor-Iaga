@@ -47,7 +47,11 @@ pub enum Expr {
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Unary(UnOp, Box<Expr>),
     /// `x in y` / `x not in y`.
-    Membership { not: bool, needle: Box<Expr>, haystack: Box<Expr> },
+    Membership {
+        not: bool,
+        needle: Box<Expr>,
+        haystack: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -40,7 +40,7 @@ pub mod validator;
 
 pub use ast::{Action, BinOp, Expr, Lit, Policy, Program, UnOp, Verdict};
 pub use errors::{AplError, Result};
-pub use eval::{evaluate_program, eval_expr, Context, EvalBudget, PolicyFired, Value};
+pub use eval::{eval_expr, evaluate_program, Context, EvalBudget, PolicyFired, Value};
 pub use parser::parse;
 pub use validator::validate;
 

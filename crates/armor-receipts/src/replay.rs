@@ -37,10 +37,7 @@ pub struct ReplayReport {
 }
 
 /// Verify the chain for a run and return the `ChainStatus`. No drift check.
-pub async fn verify_only(
-    store: &dyn ReceiptStore,
-    run_id: &str,
-) -> Result<ChainStatus> {
+pub async fn verify_only(store: &dyn ReceiptStore, run_id: &str) -> Result<ChainStatus> {
     store.verify_chain(run_id).await
 }
 
@@ -73,8 +70,7 @@ where
     let mut divergences = 0u64;
     for r in &receipts {
         let current = evaluator(r);
-        let divergent = current.verdict != r.body.verdict
-            || current.reasons != r.body.reasons;
+        let divergent = current.verdict != r.body.verdict || current.reasons != r.body.reasons;
         if divergent {
             divergences += 1;
         }

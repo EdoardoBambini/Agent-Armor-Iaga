@@ -154,10 +154,7 @@ mod wired {
             .collect();
         match TractEngine::from_paths(&refs) {
             Ok(eng) => {
-                tracing::info!(
-                    models = eng.model_count(),
-                    "reasoning: tract engine active"
-                );
+                tracing::info!(models = eng.model_count(), "reasoning: tract engine active");
                 Arc::new(eng)
             }
             Err(e) => {

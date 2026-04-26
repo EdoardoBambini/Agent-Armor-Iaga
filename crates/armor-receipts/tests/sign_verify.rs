@@ -34,8 +34,8 @@ fn tampered_verdict_fails_verification() {
     let body = body_template(signer.key_id());
     let mut receipt = signer.sign(body).expect("sign ok");
     receipt.body.verdict = Verdict::Block; // tamper after signing
-    let err = verify_receipt(&receipt, &signer.verifying_key())
-        .expect_err("must fail: verdict tampered");
+    let err =
+        verify_receipt(&receipt, &signer.verifying_key()).expect_err("must fail: verdict tampered");
     let msg = format!("{}", err);
     assert!(msg.contains("signature"), "unexpected error: {}", msg);
 }
@@ -46,8 +46,7 @@ fn wrong_key_fails_verification() {
     let signer_b = ReceiptSigner::generate();
     let body = body_template(signer_a.key_id());
     let receipt = signer_a.sign(body).expect("sign ok");
-    verify_receipt(&receipt, &signer_b.verifying_key())
-        .expect_err("must fail: different key");
+    verify_receipt(&receipt, &signer_b.verifying_key()).expect_err("must fail: different key");
 }
 
 #[test]

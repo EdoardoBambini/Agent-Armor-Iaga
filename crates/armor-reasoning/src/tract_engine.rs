@@ -36,9 +36,8 @@ use crate::evidence::{EvalInput, MlEvidence, ModelDigest};
 /// Models accepting `[1, INPUT_DIM]` float32 work out of the box.
 pub const INPUT_DIM: usize = 64;
 
-type RunnableModel = Arc<
-    SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>,
->;
+type RunnableModel =
+    Arc<SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>>;
 
 struct LoadedModel {
     name: String,
@@ -72,9 +71,7 @@ impl TractEngine {
     /// Build directly from an in-memory `(name, RunnableModel, digest_seed)`
     /// triple. Exposed for tests that don't want to write a real ONNX
     /// file to disk; production callers use `from_paths`.
-    pub fn from_runnables(
-        runnables: Vec<(String, RunnableModel, Vec<u8>)>,
-    ) -> Self {
+    pub fn from_runnables(runnables: Vec<(String, RunnableModel, Vec<u8>)>) -> Self {
         let models = runnables
             .into_iter()
             .map(|(name, runner, digest_seed)| LoadedModel {
@@ -168,10 +165,12 @@ fn run_one(model: &LoadedModel, input_vec: &[f32]) -> Result<f32> {
             name: model.name.clone(),
             msg: "model returned no outputs".into(),
         })?;
-    let slice = out.as_slice::<f32>().map_err(|e| ReasoningError::Inference {
-        name: model.name.clone(),
-        msg: e.to_string(),
-    })?;
+    let slice = out
+        .as_slice::<f32>()
+        .map_err(|e| ReasoningError::Inference {
+            name: model.name.clone(),
+            msg: e.to_string(),
+        })?;
     slice
         .first()
         .copied()

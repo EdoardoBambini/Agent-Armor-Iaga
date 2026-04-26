@@ -8,35 +8,62 @@ use logos::Logos;
 #[logos(skip r"//[^\n]*")]
 pub enum Token {
     // keywords
-    #[token("policy")] Policy,
-    #[token("when")]   When,
-    #[token("then")]   Then,
-    #[token("allow")]  Allow,
-    #[token("review")] Review,
-    #[token("block")]  Block,
-    #[token("reason")] Reason,
-    #[token("evidence")] Evidence,
-    #[token("and")]    And,
-    #[token("or")]     Or,
-    #[token("not")]    Not,
-    #[token("in")]     In,
-    #[token("true")]   True,
-    #[token("false")]  False,
+    #[token("policy")]
+    Policy,
+    #[token("when")]
+    When,
+    #[token("then")]
+    Then,
+    #[token("allow")]
+    Allow,
+    #[token("review")]
+    Review,
+    #[token("block")]
+    Block,
+    #[token("reason")]
+    Reason,
+    #[token("evidence")]
+    Evidence,
+    #[token("and")]
+    And,
+    #[token("or")]
+    Or,
+    #[token("not")]
+    Not,
+    #[token("in")]
+    In,
+    #[token("true")]
+    True,
+    #[token("false")]
+    False,
 
     // punctuation
-    #[token("{")] LBrace,
-    #[token("}")] RBrace,
-    #[token("(")] LParen,
-    #[token(")")] RParen,
-    #[token(",")] Comma,
-    #[token(".")] Dot,
-    #[token("=")] Eq,
-    #[token("==")] EqEq,
-    #[token("!=")] NotEq,
-    #[token("<=")] LtEq,
-    #[token(">=")] GtEq,
-    #[token("<")] Lt,
-    #[token(">")] Gt,
+    #[token("{")]
+    LBrace,
+    #[token("}")]
+    RBrace,
+    #[token("(")]
+    LParen,
+    #[token(")")]
+    RParen,
+    #[token(",")]
+    Comma,
+    #[token(".")]
+    Dot,
+    #[token("=")]
+    Eq,
+    #[token("==")]
+    EqEq,
+    #[token("!=")]
+    NotEq,
+    #[token("<=")]
+    LtEq,
+    #[token(">=")]
+    GtEq,
+    #[token("<")]
+    Lt,
+    #[token(">")]
+    Gt,
 
     // literals
     #[regex(r#""([^"\\]|\\["\\nrt])*""#, |lex| unescape(lex.slice()))]

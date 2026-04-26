@@ -1,8 +1,6 @@
 //! Evaluator correctness + determinism tests.
 
-use armor_apl::{
-    compile, evaluate_program, Context, EvalBudget, Value, Verdict,
-};
+use armor_apl::{compile, evaluate_program, Context, EvalBudget, Value, Verdict};
 use serde_json::json;
 
 fn ctx(v: serde_json::Value) -> Context {
@@ -92,7 +90,10 @@ fn not_in_list_inverts_membership() {
         "workspace": { "allowlist": ["ok.com"] }
     }));
     assert_eq!(
-        evaluate_program(&prog, &c, &mut b).unwrap().unwrap().verdict,
+        evaluate_program(&prog, &c, &mut b)
+            .unwrap()
+            .unwrap()
+            .verdict,
         Verdict::Block
     );
 }
@@ -100,10 +101,9 @@ fn not_in_list_inverts_membership() {
 #[test]
 fn short_circuit_and_does_not_eval_rhs() {
     // rhs is undefined path; with short-circuit on false LHS, no error.
-    let prog = compile(
-        r#"policy "p" { when false and action.undefined.deeply.nested then block }"#,
-    )
-    .unwrap();
+    let prog =
+        compile(r#"policy "p" { when false and action.undefined.deeply.nested then block }"#)
+            .unwrap();
     let mut b = EvalBudget::default();
     let fired = evaluate_program(&prog, &ctx(json!({})), &mut b).unwrap();
     assert!(fired.is_none());
@@ -140,10 +140,7 @@ fn builtin_starts_with_and_ends_with() {
 
 #[test]
 fn numeric_comparison() {
-    let prog = compile(
-        r#"policy "p" { when action.risk_score > 80 then block }"#,
-    )
-    .unwrap();
+    let prog = compile(r#"policy "p" { when action.risk_score > 80 then block }"#).unwrap();
     let mut b = EvalBudget::default();
     let c1 = ctx(json!({"action": {"risk_score": 95}}));
     let c2 = ctx(json!({"action": {"risk_score": 50}}));
@@ -175,7 +172,9 @@ fn first_matching_policy_wins() {
     )
     .unwrap();
     let mut b = EvalBudget::default();
-    let fired = evaluate_program(&prog, &ctx(json!({})), &mut b).unwrap().unwrap();
+    let fired = evaluate_program(&prog, &ctx(json!({})), &mut b)
+        .unwrap()
+        .unwrap();
     assert_eq!(fired.policy_name, "first");
     assert_eq!(fired.verdict, Verdict::Review);
 }
@@ -203,7 +202,8 @@ fn eval_is_deterministic() {
 
 #[test]
 fn budget_exhaustion_errors_out() {
-    let prog = compile(r#"policy "p" { when action.x or action.y or action.z then allow }"#).unwrap();
+    let prog =
+        compile(r#"policy "p" { when action.x or action.y or action.z then allow }"#).unwrap();
     let mut b = EvalBudget::new(1); // absurdly small
     let res = evaluate_program(&prog, &ctx(json!({"action": {}})), &mut b);
     assert!(res.is_err(), "expected budget exhaustion");

@@ -185,11 +185,13 @@ mod signed {
             // wired or the engine produced no evidence — receipt stays
             // bit-identical to M2 in that case.
             let (model_digests, ml_scores) = match evidence {
-                Some(ev) if !ev.model_digests.is_empty() || ev
-                    .scores
-                    .as_object()
-                    .map(|o| !o.is_empty())
-                    .unwrap_or(false) =>
+                Some(ev)
+                    if !ev.model_digests.is_empty()
+                        || ev
+                            .scores
+                            .as_object()
+                            .map(|o| !o.is_empty())
+                            .unwrap_or(false) =>
                 {
                     let digests: Vec<armor_receipts::ModelDigest> = ev
                         .model_digests
@@ -289,8 +291,7 @@ mod signed {
         if let Ok(p) = std::env::var("ARMOR_SIGNER_KEY_PATH") {
             return Some(std::path::PathBuf::from(p));
         }
-        let home = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))?;
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
         let mut p = std::path::PathBuf::from(home);
         p.push(".armor");
         p.push("keys");
@@ -358,9 +359,7 @@ mod signed {
                 return None;
             }
         } else {
-            tracing::info!(
-                "receipts: unrecognized database_url scheme; receipts disabled"
-            );
+            tracing::info!("receipts: unrecognized database_url scheme; receipts disabled");
             return None;
         };
 

@@ -38,10 +38,10 @@ const INHERITED_ENV_ALLOWLIST: &[&str] = &[
     "LANG",
     "LC_ALL",
     "TZ",
-    "SystemRoot",     // Windows
-    "USERPROFILE",    // Windows
-    "TEMP",           // Windows
-    "TMPDIR",         // Unix
+    "SystemRoot",  // Windows
+    "USERPROFILE", // Windows
+    "TEMP",        // Windows
+    "TMPDIR",      // Unix
 ];
 
 pub struct UserspaceKernel {
@@ -59,9 +59,7 @@ impl UserspaceKernel {
     pub fn allow_all() -> Self {
         let policy: PolicyCheck = std::sync::Arc::new(|_spec: &ProcessSpec| {
             Box::pin(async { KernelDecision::Allow })
-                as std::pin::Pin<
-                    Box<dyn std::future::Future<Output = KernelDecision> + Send>,
-                >
+                as std::pin::Pin<Box<dyn std::future::Future<Output = KernelDecision> + Send>>
         });
         Self { policy }
     }

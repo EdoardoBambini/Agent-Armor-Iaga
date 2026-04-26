@@ -711,32 +711,31 @@ async fn cmd_serve(
     // *before* the receipt logger so the bundle digest can be embedded
     // in every receipt's `policy_hash` field.
     #[cfg(feature = "apl")]
-    let apl_overlay: Option<Arc<agent_armor::pipeline::apl_overlay::AplOverlay>> =
-        match policy_path {
-            None => None,
-            Some(p) => {
-                use agent_armor::pipeline::apl_overlay::AplOverlay;
-                match AplOverlay::load(std::path::Path::new(p)) {
-                    Ok(o) => {
-                        tracing::info!(
-                            policies = o.policy_count(),
-                            hash = o.policy_hash(),
-                            source = %o.source_path().display(),
-                            "M6: APL policy overlay loaded"
-                        );
-                        Some(Arc::new(o))
-                    }
-                    Err(e) => {
-                        eprintln!("APL load failed: {}", e);
-                        process::exit(2);
-                    }
+    let apl_overlay: Option<Arc<agent_armor::pipeline::apl_overlay::AplOverlay>> = match policy_path
+    {
+        None => None,
+        Some(p) => {
+            use agent_armor::pipeline::apl_overlay::AplOverlay;
+            match AplOverlay::load(std::path::Path::new(p)) {
+                Ok(o) => {
+                    tracing::info!(
+                        policies = o.policy_count(),
+                        hash = o.policy_hash(),
+                        source = %o.source_path().display(),
+                        "M6: APL policy overlay loaded"
+                    );
+                    Some(Arc::new(o))
+                }
+                Err(e) => {
+                    eprintln!("APL load failed: {}", e);
+                    process::exit(2);
                 }
             }
-        };
+        }
+    };
 
     #[cfg(feature = "apl")]
-    let policy_hash_override =
-        apl_overlay.as_ref().map(|o| o.policy_hash().to_string());
+    let policy_hash_override = apl_overlay.as_ref().map(|o| o.policy_hash().to_string());
     #[cfg(not(feature = "apl"))]
     let policy_hash_override: Option<String> = None;
 
@@ -1517,7 +1516,11 @@ fn cmd_policy_test(path: &str, context_path: Option<&str>) -> i32 {
     println!(
         "OK  parsed {} polic{}  from {}",
         program.policies.len(),
-        if program.policies.len() == 1 { "y" } else { "ies" },
+        if program.policies.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        },
         path
     );
     for p in &program.policies {
@@ -1597,7 +1600,11 @@ fn cmd_kernel_status() {
     println!("backend: {}", k.backend_name());
     println!(
         "authoritative: {}",
-        if k.is_authoritative() { "yes" } else { "no (soft enforcement)" }
+        if k.is_authoritative() {
+            "yes"
+        } else {
+            "no (soft enforcement)"
+        }
     );
     if cfg!(feature = "linux-bpf") && cfg!(target_os = "linux") {
         println!("linux-bpf: scaffold compiled (loader pending M4.1)");
@@ -1607,15 +1614,8 @@ fn cmd_kernel_status() {
 }
 
 #[cfg(feature = "kernel")]
-async fn cmd_kernel_run(
-    db_url: &str,
-    agent_id: &str,
-    cwd: Option<&str>,
-    cmd: &[String],
-) -> i32 {
-    use agent_armor::core::types::{
-        ActionDetail, ActionType, GovernanceDecision, InspectRequest,
-    };
+async fn cmd_kernel_run(db_url: &str, agent_id: &str, cwd: Option<&str>, cmd: &[String]) -> i32 {
+    use agent_armor::core::types::{ActionDetail, ActionType, GovernanceDecision, InspectRequest};
     use agent_armor::pipeline::execute_pipeline::execute_pipeline;
     use armor_kernel::{
         EnforcementKernel, KernelDecision, PolicyCheck, ProcessSpec, UserspaceKernel,
@@ -1703,10 +1703,7 @@ async fn cmd_kernel_run(
             ),
         );
         if let Some(cwd) = &spec.working_dir {
-            payload.insert(
-                "cwd".to_string(),
-                serde_json::Value::String(cwd.clone()),
-            );
+            payload.insert("cwd".to_string(), serde_json::Value::String(cwd.clone()));
         }
         let request = InspectRequest {
             agent_id: spec.agent_id.clone(),
@@ -1734,10 +1731,7 @@ async fn cmd_kernel_run(
                     KernelDecision::Block
                 }
             }
-        })
-            as std::pin::Pin<
-                Box<dyn std::future::Future<Output = KernelDecision> + Send>,
-            >
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = KernelDecision> + Send>>
     });
 
     let kernel = UserspaceKernel::new(policy);
@@ -1866,7 +1860,10 @@ async fn cmd_replay(
             );
         }
         Ok(ChainStatus::Broken { seq, reason }) => {
-            eprintln!("CHAIN BROKEN  run_id={}  seq={}  reason={}", rid, seq, reason);
+            eprintln!(
+                "CHAIN BROKEN  run_id={}  seq={}  reason={}",
+                rid, seq, reason
+            );
             return 1;
         }
         Ok(ChainStatus::Empty) => {

@@ -102,10 +102,7 @@ fn compute_policy_hash(program: &Program) -> String {
 
 /// Stricter-wins merge between the YAML risk decision and an APL
 /// fired verdict. APL can tighten the verdict; it cannot relax it.
-pub fn merge_decisions(
-    yaml: GovernanceDecision,
-    apl: armor_apl::Verdict,
-) -> GovernanceDecision {
+pub fn merge_decisions(yaml: GovernanceDecision, apl: armor_apl::Verdict) -> GovernanceDecision {
     let apl_as_yaml = match apl {
         armor_apl::Verdict::Allow => GovernanceDecision::Allow,
         armor_apl::Verdict::Review => GovernanceDecision::Review,
@@ -164,8 +161,8 @@ pub fn build_overlay_context(
         GovernanceDecision::Review => "review",
         GovernanceDecision::Block => "block",
     };
-    let payload_json = serde_json::to_value(&request.action.payload)
-        .unwrap_or(serde_json::Value::Null);
+    let payload_json =
+        serde_json::to_value(&request.action.payload).unwrap_or(serde_json::Value::Null);
     let workspace_json = serde_json::json!({
         "id": workspace_id.unwrap_or(""),
         "allowlist": workspace_allowlist,

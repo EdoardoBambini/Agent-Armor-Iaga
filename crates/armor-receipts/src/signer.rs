@@ -127,9 +127,10 @@ pub fn verify_receipt(receipt: &Receipt, vk: &VerifyingKey) -> Result<()> {
     arr.copy_from_slice(&sig_bytes);
     let sig = Signature::from_bytes(&arr);
     let msg = receipt.body.signing_bytes()?;
-    vk.verify(&msg, &sig).map_err(|_| ReceiptError::SignatureInvalid {
-        seq: receipt.body.seq,
-    })
+    vk.verify(&msg, &sig)
+        .map_err(|_| ReceiptError::SignatureInvalid {
+            seq: receipt.body.seq,
+        })
 }
 
 #[cfg(unix)]
