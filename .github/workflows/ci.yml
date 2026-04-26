@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, "feat/1.0-**"]
     tags: ["v*"]
   pull_request:
     branches: [main, master]
@@ -29,21 +29,18 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            community/target
-          key: ${{ runner.os }}-cargo-check-${{ hashFiles('community/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-check-
 
       - name: Check formatting
-        working-directory: community
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Run clippy
-        working-directory: community
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Security audit
-        working-directory: community
         run: cargo audit
 
   test:
@@ -68,18 +65,19 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            community/target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('community/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-test-
 
-      - name: Run tests
-        working-directory: community
-        run: cargo test --all-features
+      - name: Run tests (default features)
+        run: cargo test --workspace
+
+      - name: Run armor-reasoning tests with `ml` feature (tract-onnx)
+        run: cargo test -p armor-reasoning --features ml
 
       - name: Validate example plugin path
-        working-directory: community
-        run: cargo test --features plugins --test plugin_example_tests
+        run: cargo test -p agent-armor-core --features plugins --test plugin_example_tests
 
       - name: Build TypeScript SDK
         working-directory: sdks/typescript
@@ -90,6 +88,15 @@ jobs:
       - name: Compile Python SDK
         working-directory: sdks/python
         run: python -m compileall agent_armor
+
+      - name: Build UI (for ui-embed)
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Verify ui-embed feature compiles
+        run: cargo build -p agent-armor-core --features ui-embed
 
   build:
     name: Build
@@ -105,20 +112,27 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            community/target
-          key: ${{ runner.os }}-cargo-build-${{ hashFiles('community/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-
 
       - name: Build release binary
-        working-directory: community
-        run: cargo build --release
+        run: cargo build --release --workspace
+
+      - name: Smoke-test CLI surface (1.0)
+        run: |
+          ./target/release/armor --help
+          ./target/release/armor kernel status
+          ./target/release/armor reasoning info
+          ./target/release/armor policy lint crates/armor-apl/examples/no_pii_egress.apl
+          ./target/release/armor policy test crates/armor-apl/examples/no_pii_egress.apl --context crates/armor-apl/examples/sample_context.json
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: agent-armor-binary
-          path: community/target/release/agent-armor
+          path: target/release/agent-armor
 
   release:
     name: Release
