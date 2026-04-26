@@ -1,0 +1,11 @@
+{
+  "action": {
+    "kind": "http.request",
+    "url": { "host": "example.com" },
+    "payload": "hello",
+    "risk_score": 10
+  },
+  "workspace": {
+    "allowlist": ["internal.example.com", "api.example.com"]
+  }
+}

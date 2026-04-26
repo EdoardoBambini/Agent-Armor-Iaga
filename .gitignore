@@ -25,4 +25,14 @@ __pycache__/
 
 # Internal docs
 docs/PRD.md
-assets/hero.mp4
+
+# Media (large, kept local)
+media/hero.mp4
+
+# 1.0 M1: build artifacts + dev leftovers
+*.log
+!.claude/**/*.log
+agent-armor-video/out/
+ui/dist/
+crates/armor-core/*.db
+crates/armor-core/*.sqlite

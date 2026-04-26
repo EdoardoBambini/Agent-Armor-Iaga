@@ -1,71 +1,116 @@
 # Contributing to Agent Armor
 
-Thanks for your interest in contributing to Agent Armor! This project is building the zero-trust security runtime for autonomous AI agents.
+Thanks for considering a contribution. Agent Armor is a zero-trust
+governance kernel for autonomous AI agents. We optimize for: deterministic
+behavior, signed audit trails, and honest enforcement posture. Anything
+that strengthens those properties is welcome.
 
-## Getting Started
-
-```bash
-git clone https://github.com/EdoardoBambini/Agent-Armor-Iaga.git
-cd Agent-Armor-Iaga/community
-cargo build
-cargo run
-```
-
-Open `http://localhost:4010` to see the dashboard.
-
-## Development
+## Quick start
 
 ```bash
-cargo run                     # Start server (port 4010)
-cargo test                    # Run test suite
-cargo clippy                  # Lint
-cargo fmt                     # Format code
+git clone https://github.com/EdoardoBambini/Agent-Armor-Iaga
+cd Agent-Armor-Iaga
+
+# Build everything
+cargo build --workspace
+
+# Run the full test suite
+cargo test --workspace
+cargo test -p armor-reasoning --features ml
+
+# Lint
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-## Project Structure
+The default build uses no native ML deps. To exercise the ONNX backend
+locally, add `--features ml` to `cargo build` / `cargo test` for the
+`armor-reasoning` crate.
 
-- `community/src/modules/` — 8 security layer implementations
-- `community/src/pipeline/` — Core governance pipeline orchestration
-- `community/src/server/` — Axum HTTP server (48 endpoints)
-- `community/src/dashboard/` — Embedded HTML dashboard
-- `community/src/auth/` — API key auth with Argon2
-- `community/src/events/` — SSE + webhooks
-- `sdks/` — Python and TypeScript client SDKs
+## What we accept
 
-## How to Contribute
+- **Bug fixes** with a regression test.
+- **Documentation** improvements.
+- **New features** that fit the architecture documented in
+  [`AGENT_ARMOR_1.0.md`](AGENT_ARMOR_1.0.md).
+- **Performance** improvements with a reproducible benchmark.
 
-### Reporting Issues
+## ADRs are required for non-trivial changes
 
-- Use GitHub Issues
-- Include: what you expected, what happened, steps to reproduce
-- For security issues, email iaga.start@gmail.com instead
+If your change introduces a new capability, alters a public trait, or
+shifts an architectural boundary, add an ADR under
+[`docs/adr/`](docs/adr/) following the numbering and template of the
+existing ones (0001–0008). Keep it short: context, decision,
+consequences, what's deliberately out of scope.
 
-### Pull Requests
+A PR that touches architecture without an ADR will be asked to add one
+before review.
 
-1. Fork the repo
-2. Create a branch: `git checkout -b feat/my-feature`
-3. Make your changes
-4. Add tests if applicable
-5. Run `cargo test && cargo clippy`
-6. Open a PR with a clear description
+## Code style
 
-### What We're Looking For
+- `cargo fmt --all` before submitting.
+- `cargo clippy --workspace --all-targets -- -D warnings` must pass.
+- Public APIs need rustdoc with at least a one-line summary.
+- Prefer additive feature flags over breaking changes.
+- Comments explain *why*, not *what*. Code says what.
 
-- **New detection rules** — Pattern matching for risky agent behaviors
-- **Protocol parsers** — New agent framework adapters and protocol hardening
-- **Policy templates** — Pre-built policy sets for common use cases
-- **SDK improvements** — Python and TypeScript client SDK features
-- **Documentation** — Tutorials, examples, translations
-- **Bug fixes** — Always welcome
+## Commit conventions
 
-## Code Style
+We don't enforce Conventional Commits, but they help. Examples that
+work well in this repo:
 
-- Follow `rustfmt` defaults
-- Use `thiserror` for error types
-- Prefer `Arc<Mutex<>>` for shared state
-- Keep modules focused and single-purpose
-- Use `tracing` for logging, not `println!`
+```
+feat(receipts): add Postgres backend
+fix(apl): short-circuit `or` evaluating rhs eagerly
+docs(adr): clarify stricter-wins merge semantics
+chore(ci): cache cargo registry across jobs
+```
 
-## License
+## Branching and PRs
 
-By contributing, you agree that your contributions will be licensed under the same [Business Source License 1.1](LICENSE) as the project.
+- Target `main` for PRs.
+- One topic per PR. Refactors and feature work go in separate PRs
+  whenever possible.
+- CI must be green before merge. No skipped checks.
+- Squash on merge unless commits are individually meaningful.
+
+## License and the OSS / Enterprise relationship
+
+Agent Armor (the open-source build, this repository) is licensed under
+[Business Source License 1.1](LICENSE) with **Change License:
+Apache-2.0** and a Change Date of four years from publication. By
+submitting a contribution you agree to license your work under the
+same terms.
+
+We do not require a CLA. BUSL-1.1 plus the automatic Apache-2.0
+conversion baked into the licence is enough to keep the project
+durable for community contributors and forks.
+
+**Agent Armor Enterprise** is a separate commercial product built on
+the same governance kernel. Enterprise modules live in a separate
+repository under a commercial license. Contributions to this repo
+flow into both editions automatically when they touch the shared
+kernel; the reverse is never true (Enterprise-only code never lands
+here).
+
+What this means in practice for contributors:
+
+- A bug fix or feature in `crates/armor-core`, `crates/armor-receipts`,
+  `crates/armor-apl`, `crates/armor-reasoning`, or `crates/armor-kernel`
+  benefits both OSS and Enterprise users. Welcome.
+- We will **never** silently move OSS features behind an Enterprise
+  paywall. The promise is documented in
+  [`AGENT_ARMOR_1.0.md`](AGENT_ARMOR_1.0.md) §9 and we honour it.
+- If you want to discuss building something Enterprise-only (a
+  vertical compliance pack, a SIEM connector, a notified-body
+  workflow), email `enterprise@iaga.start@gmail.com` rather than
+  opening a PR here.
+
+## Security
+
+If you find a security issue that should not be reported publicly,
+email `iaga.start@gmail.com` rather than opening a public issue.
+We'll respond within a reasonable timeframe and coordinate disclosure.
+
+## Questions
+
+Open a GitHub Discussion or issue. Founder reads everything.

@@ -1,393 +1,373 @@
-<h1 align="center">Agent Armor</h1>
+<h1 align="center">Agent Armor 1.0</h1>
 
 <p align="center">
-  <strong>Zero-trust governance runtime for AI agent actions</strong>
+  <strong>Zero-trust governance kernel for autonomous AI agents.</strong>
 </p>
 
 <p align="center">
-  <a href="#agent-armor-040-community">v0.4.0</a> -
-  <a href="#quick-start">Quick Start</a> -
-  <a href="#what-ships-in-community-040">Community Features</a> -
-  <a href="#docs">Docs</a> -
-  <a href="#testing-and-verification">Testing</a>
+  <img src="https://img.shields.io/badge/version-1.0.0-blue" alt="version" />
+  <img src="https://img.shields.io/badge/license-BUSL--1.1-blue" alt="license" />
+  <img src="https://img.shields.io/badge/12%20layers-defense%20in%20depth-green" alt="12 layers" />
+  <img src="https://img.shields.io/badge/Rust-stable-orange" alt="Rust" />
 </p>
 
 <p align="center">
-  <a href="https://github.com/EdoardoBambini/Agent-Armor-Iaga/actions"><img src="https://github.com/EdoardoBambini/Agent-Armor-Iaga/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-BUSL--1.1-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/version-0.4.0-purple" alt="Version 0.4.0">
-  <img src="https://img.shields.io/badge/rust-1.75%2B-orange" alt="Rust">
+  <a href="#what-1-0-is">What 1.0 is</a> ·
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#documentation">Docs</a> ·
+  <a href="#status">Status</a>
 </p>
 
 <p align="center">
-  <img src="assets/hero.gif" alt="Agent Armor" width="600">
+  <img src="media/hero.gif" alt="Agent Armor 1.0 — kernel-enforced governance for autonomous agents" width="720" />
 </p>
 
 ---
 
-## Agent Armor 0.4.0 Community
+## What 1.0 is
 
-`0.4.0` is the current community release in this repository.
+Three things in one binary, glued by a typed deterministic policy language:
 
-It ships a real governance runtime with:
+1. **A kernel.** Armor sits below the agent SDK. Process launches go
+   through `armor run`, which consults the governance pipeline before
+   spawning. The 0.4.0 HTTP sidecar still works for SDK-aware agents;
+   the kernel is the chokepoint for everything else.
+2. **A signed log.** Every governance verdict produces an Ed25519-signed
+   receipt linked to the previous one in a Merkle append-log per run.
+   Replay verifies the chain bit-exact and detects policy drift.
+3. **A reasoning brain.** Optional ML models (ONNX, opt-in) emit
+   evidence — never verdicts. The deterministic policy decides; ML
+   produces scores the policy can read. Receipts embed the SHA-256 of
+   every model that touched the decision.
 
-- the full 8-layer pipeline
-- sequence-aware session hardening for same-session multi-call behavior
-- persisted workspace rules and built-in policy templates
-- feature-gated WASM plugin loading, runtime evaluation, and CLI inspection
-- SQLite by default plus optional PostgreSQL support
-- expanded Python and TypeScript SDKs plus lightweight framework adapters
-- live HTTP end-to-end tests, CLI tests, and real plugin-path validation
+All driven by APL: a typed DSL with deterministic tree-walk evaluation,
+loadable as a `--policy` overlay on top of the YAML profile system.
 
-It is stronger than `0.3.0`, but it is still not the end of the full roadmap.
-The main remaining gaps are the durable-state restart story and the advanced CLI
-commands called out below.
+---
 
-## Why It Exists
+## Quickstart
 
-AI agents now get shell access, file access, HTTP access, database access, and
-secret access. Most stacks can execute tool calls, but they do not govern them
-well.
-
-Agent Armor sits in front of those actions and decides:
-
-- `allow`
-- `review`
-- `block`
-
-with an audit trail, risk scoring, and per-layer evidence.
-
-## What Ships In Community 0.4.0
-
-### Core Runtime
-
-- 8-layer deterministic governance pipeline
-- MCP-aware inspection path
-- ACP and A2A protocol inspection with built-in envelope validation
-- policy evaluation with workspace thresholds
-- policy templates and persisted workspace rules
-- secret reference planning
-- human review queue
-- audit trail and audit export
-- MCP proxy mode and MCP server mode over stdio
-
-### 0.4.0 Hardening And Extensibility
-
-- adaptive risk scoring now consumes real session depth and recent timestamps
-- same-session arcs like `file_read -> http` are tested through integration and
-  live HTTP paths
-- WASM plugin runtime is wired into the pipeline and exposed via:
-  - `GET /v1/plugins`
-  - `POST /v1/plugins/reload`
-  - `agent-armor plugins list`
-  - `agent-armor plugins validate <path.wasm>`
-- `community/examples/plugins/review_hint.wat` is compiled and validated in
-  tests and CI
-
-### SDKs And Adapters
-
-- Python SDK covers governance, policy, plugin, audit, telemetry, review,
-  threat intel, NHI, response, and rate-limit endpoints
-- TypeScript SDK covers the same runtime surface with `sessionId` support
-- dependency-light adapters are included for:
-  - Python: OpenAI, LangChain, CrewAI, AutoGen
-  - TypeScript: OpenAI, Vercel AI style middleware helpers
-
-### Operational Security Features
-
-- response scanning for secrets and PII in outputs
-- per-agent rate limiting
-- behavioral fingerprinting
-- threat intelligence feed and checks
-- SSE and webhook event delivery with DLQ
-
-### Storage And Runtime Hardening
-
-- SQLite storage backend
-- optional PostgreSQL backend behind `--features postgres`
-- versioned migrations in `community/migrations/`
-- `agent-armor migrate` for schema bootstrap and update
-- structured logging: `pretty`, `compact`, `json`
-- log filtering via `RUST_LOG` or `AGENT_ARMOR_LOG_LEVEL`
-- request and response correlation with `x-request-id`
-- governance result correlation with `traceId`
-
-## Current Community Limits
-
-The following community items are still missing or incomplete:
-
-- durable-state persistence is only partially closed as a restart story
-  `nhi`, `session_graph`, `taint`, `fingerprint`, and rate-limit state now have
-  storage traits and persistence hooks, but startup hydration and restart-proof
-  validation are not fully closed yet
-- enhanced CLI roadmap items are still open beyond the current commands
-  `watch`, `replay`, `benchmark`, and `policy-test` are not shipped yet
-- SDK coverage is materially broader now, but some responses are still exposed
-  as generic JSON objects instead of fully typed SDK models
-
-### Dashboard Status
-
-The dashboard is a live operator console backed by real runtime endpoints.
-
-It supports:
-
-- live overview metrics sourced from the audit, review, session, and analytics APIs
-- audit browsing with client-side filtering and CSV export of visible rows
-- a real review queue with approve and reject actions
-- selected-agent drill-down backed by analytics, fingerprint, and rate-limit endpoints
-- runtime controls and posture panels backed by health, firewall, threat intel, telemetry, and policy verification data
-
-When the runtime is protected, the dashboard requires a valid API key and does
-not fall back to fake demo counters.
-
-## Quick Start
-
-### Source
+### Install + start
 
 ```bash
-cd community
-cargo build --release
+cargo install --path crates/armor-core
 
-# Create a key before starting the server
-./target/release/agent-armor gen-key --label local-dev
-
-# Start the runtime
-./target/release/agent-armor serve
-
-# Inspect discovered plugins
-./target/release/agent-armor plugins list
+# Default sqlite, demo data seeded on first boot
+armor serve
 ```
 
-Open `http://localhost:4010` for the dashboard.
+### CLI flow (no auth)
+
+```bash
+# Path to a JSON file (camelCase keys, see note below)
+armor inspect ./payload.json
+
+# Launch a child process under the governance pipeline
+armor run --agent-id openclaw-builder-01 -- python my_agent.py
+
+# Replay the signed receipt chain
+armor replay --list
+armor replay <run_id>
+
+# Test an APL policy file
+armor policy lint crates/armor-apl/examples/no_pii_egress.apl
+armor policy test crates/armor-apl/examples/no_pii_egress.apl \
+    --context crates/armor-apl/examples/sample_context.json
+
+# Inspect kernel + reasoning posture
+armor kernel status
+armor reasoning info
+
+# Load an APL bundle as a live overlay on top of YAML
+armor serve --policy crates/armor-core/examples/policies/strict.apl
+```
+
+### HTTP API flow
+
+```bash
+# Generate an API key once
+armor gen-key --label my-app
+# → Key: aa_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Inspect via HTTP. Auth header is `Authorization: Bearer <key>`.
+# Payload uses camelCase: agentId, toolName, actionType.
+curl -X POST http://localhost:7777/v1/inspect \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer aa_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' \
+  -d '{
+    "agentId":  "openclaw-builder-01",
+    "framework":"langchain",
+    "action": {
+      "type":     "shell",
+      "toolName": "bash",
+      "payload":  {"cmd": "ls"}
+    }
+  }'
+```
 
 ### Docker
 
 ```bash
 docker compose up -d
-docker compose exec agent-armor ./agent-armor gen-key --label local-dev
+curl http://localhost:4010/health     # → 200
+docker compose down
 ```
 
-### Bootstrap Modes
+The container persists its DB and signer key in a named volume
+(`agent-armor-data`). Receipts signed inside the container can only be
+verified by the same container; to share a signer key across deployments
+mount your own key file or set `ARMOR_SIGNER_KEY_PATH`.
 
-Protected `/v1/*` routes require a Bearer token.
-
-Preferred bootstrap path:
+### Postgres
 
 ```bash
-cd community
-./target/release/agent-armor gen-key --label local-dev
-./target/release/agent-armor serve
+DATABASE_URL=postgres://user:pwd@host/agent_armor \
+  cargo install --path crates/armor-core --features postgres
+
+armor serve   # receipts now go to Postgres automatically
 ```
 
-For local exploration only, you can opt into open mode:
+---
 
-```bash
-AGENT_ARMOR_OPEN_MODE=true ./target/release/agent-armor serve
+## Features
+
+Cargo features on `armor-core`:
+
+| Feature      | Default | Adds                                                                  |
+|--------------|---------|------------------------------------------------------------------------|
+| `sqlite`     | ✅      | SQLite backend for audit + receipts.                                   |
+| `postgres`   | ❌      | Postgres backend.                                                      |
+| `receipts`   | ✅      | Ed25519-signed Merkle-chained receipts (M2).                           |
+| `apl`        | ✅      | Armor Policy Language parser + evaluator + `armor policy ...` (M3).    |
+| `reasoning`  | ✅      | Reasoning plane scaffold + `armor reasoning info` (M3.5).              |
+| `ml`         | ❌      | `tract-onnx` ML backend; opt-in, +~5 MB binary, +~2 min cold compile.  |
+| `kernel`     | ✅      | Enforcement kernel + `armor run` + `armor kernel status` (M4).         |
+| `linux-bpf`  | ❌      | Linux eBPF/LSM scaffold. Real loader ships in 1.0.1.                   |
+| `ui-embed`   | ❌      | Embeds `ui/dist/` into the binary via `rust-embed`.                    |
+
+`default = ["demo", "sqlite", "receipts", "apl", "reasoning", "kernel"]`.
+
+---
+
+## Architecture
+
+12 layers of defense in depth, organized into 7 architectural pillars
+described in [`AGENT_ARMOR_1.0.md`](AGENT_ARMOR_1.0.md):
+
+1. **Enforcement Kernel** — `crates/armor-kernel/` (M4 scaffold + 1.0.1 loader).
+2. **Signed Receipts** — `crates/armor-receipts/` (M2).
+3. **Armor Policy Language** — `crates/armor-apl/` (M3 + M6 live overlay).
+4. **Attested Plugins** — supply-chain integrity (1.1).
+5. **Governance Mesh** — federated rate budgets (1.1).
+6. **Visual Plane** — `ui/` embedded via `ui-embed` feature.
+7. **Probabilistic Reasoning** — `crates/armor-reasoning/` (M3.5).
+
+Workspace layout:
+
+```
+agent-armor/
+├── crates/
+│   ├── armor-core/          # pipeline, server, CLI, AppState
+│   ├── armor-receipts/      # Ed25519 + Merkle log + replay
+│   ├── armor-apl/           # APL parser + evaluator
+│   ├── armor-reasoning/     # ML evidence (tract-onnx behind `ml`)
+│   └── armor-kernel/        # cross-platform launcher + eBPF scaffold
+├── docs/adr/                # 8 ADRs (0001–0008)
+├── ui/                      # frontend (embedded via ui-embed feature)
+├── media/                   # hero assets
+├── AGENT_ARMOR_1.0.md       # design document
+├── MIGRATION.md             # 0.4.0 → 1.0 + per-milestone notes
+└── CHANGELOG.md             # release notes
 ```
 
-## Example Calls
+---
 
-```bash
-# Health
-curl http://localhost:4010/health
+## Documentation
 
-# Inspect a safe action
-curl -X POST http://localhost:4010/v1/inspect \
-  -H "Authorization: Bearer <key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "agentId": "openclaw-builder-01",
-    "workspaceId": "ws-demo",
-    "framework": "openclaw",
-    "metadata": {
-      "sessionId": "session-123"
-    },
-    "protocol": "mcp",
-    "action": {
-      "type": "file_read",
-      "toolName": "filesystem.read",
-      "payload": {
-        "path": "README.md",
-        "intent": "read documentation"
-      }
-    }
-  }'
+- **Design**: [`AGENT_ARMOR_1.0.md`](AGENT_ARMOR_1.0.md)
+- **Migration from 0.4.0**: [`MIGRATION.md`](MIGRATION.md)
+- **Release notes**: [`CHANGELOG.md`](CHANGELOG.md)
+- **Architectural decisions**:
+  - [ADR 0001 — Workspace split](docs/adr/0001-workspace-split.md)
+  - [ADR 0002 — Open-source license + scope decisions](docs/adr/0002-open-source-license-and-scope.md)
+  - [ADR 0003 — Signed receipts design](docs/adr/0003-signed-receipts-design.md)
+  - [ADR 0004 — APL MVP](docs/adr/0004-apl-mvp.md)
+  - [ADR 0005 — Reasoning plane MVP](docs/adr/0005-reasoning-plane-mvp.md)
+  - [ADR 0006 — Kernel MVP](docs/adr/0006-kernel-mvp.md)
+  - [ADR 0007 — M5 hardening + RC posture](docs/adr/0007-m5-hardening-rc.md)
+  - [ADR 0008 — APL as live policy engine](docs/adr/0008-apl-as-live-policy-engine.md)
+- **Contributing**: [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
-# Scan a tool response for leaked credentials
-curl -X POST http://localhost:4010/v1/response/scan \
-  -H "Authorization: Bearer <key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "requestId": "scan-1",
-    "agentId": "openclaw-builder-01",
-    "toolName": "terminal.exec",
-    "responsePayload": {
-      "secret": "AKIA1234567890ABCDEF"
-    }
-  }'
+---
 
-# List plugin registry state
-curl http://localhost:4010/v1/plugins \
-  -H "Authorization: Bearer <key>"
-```
+## Status
 
-## MCP Stdio Example
+**1.0 GA candidate.** All six 1.0 milestones complete, 234/234 default
+tests passing, clippy `--all-targets -D warnings` clean.
 
-Run the built-in MCP client example to exercise `initialize`, `tools/list`, and
-`tools/call` against `agent-armor mcp-server` over stdio:
+What's intentionally honest about the posture:
 
-```bash
-cd community
-cargo run --example mcp_stdio_client
-```
+- `armor kernel status` reports `authoritative: no (soft enforcement)`
+  until **1.0.1** ships the real eBPF/LSM loader. We don't market
+  enforcement we don't yet provide.
+- `armor reasoning info` reports `engine: noop` unless models are
+  configured; pre-trained models for intent-drift / prompt-injection /
+  anomaly-seq ship in **1.0.2**.
+- WASM codegen for APL is **1.0.3**. Today the evaluator is
+  tree-walking, fully deterministic, and replay-safe — the WASM swap
+  is purely a performance / sandbox-isolation upgrade.
+- macOS Endpoint Security and Windows ETW kernel backends, governance
+  mesh, KMS/HSM signers, GPU ML — all **1.1**.
 
-## Plugin Example
+The 1.0 surface is locked. Patch releases are additive; 1.1 is the
+next major.
 
-A real example plugin source lives in `community/examples/plugins/review_hint.wat`.
-The runtime loads `.wasm`, so the test and CI path compiles that WAT source and
-validates it against the Agent Armor plugin ABI.
+---
 
-## Docs
+---
 
-All current docs for `0.4.0` are linked here.
+## Community vs Enterprise
 
-| Document | Purpose |
-|---|---|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Current runtime architecture and module boundaries |
-| [`docs/DEMO.md`](docs/DEMO.md) | Demo and local walkthrough |
-| [`docs/CASE_STUDY.md`](docs/CASE_STUDY.md) | Historical v2 benchmark and evaluation write-up |
-| [`sdks/python/README.md`](sdks/python/README.md) | Python SDK quick start and adapters |
-| [`sdks/typescript/README.md`](sdks/typescript/README.md) | TypeScript SDK quick start and adapters |
+> **Agent Armor Enterprise: from governance kernel to audit dossier in 14 days.**
 
-## API Highlights
+The governance kernel is the same in both editions. Enterprise adds
+modules that live in a separate commercial repository. The table below
+lists only what is **verifiable today** — what you can clone, build,
+inspect, or call against a running instance. Roadmap items (eBPF
+loader, mesh, WASM codegen, curated ML models) are tracked in
+[`CHANGELOG.md`](CHANGELOG.md) under the version where they ship.
 
-### Public
+### What ships in the open-source build today (this repository)
 
-- `GET /`
-- `GET /health`
+Verifiable by `git clone && cargo test --workspace && docker compose up -d`:
 
-### Governance
+- **12-layer governance pipeline** — single binary, single endpoint
+  (`POST /v1/inspect`), 234/234 tests passing.
+- **Signed action receipts** — Ed25519 + Merkle append-log per run,
+  verifiable offline with `armor replay <run_id> --verify-only`.
+- **Armor Policy Language (APL)** — typed DSL with deterministic
+  tree-walk evaluator, instruction budget, short-circuit evaluation.
+  Try with `armor policy lint <file.apl>`.
+- **APL live overlay** — load a bundle as `armor serve --policy
+  <file.apl>`. Stricter-wins merge with the YAML profile system.
+- **Reasoning plane scaffold** — `armor reasoning info`. Bring your
+  own ONNX models via `--features ml` (`tract` backend, no native
+  deps).
+- **Cross-platform UserspaceKernel** — `armor run -- <cmd>` spawns
+  governed child processes on Linux, macOS, Windows.
+- **HTTP API with Bearer auth** — `armor gen-key` then call
+  `POST /v1/inspect` with `Authorization: Bearer <key>`.
+- **SQLite and Postgres backends** — switch by setting
+  `DATABASE_URL=postgres://...` and building with `--features
+  postgres`. Receipts go to the matching backend automatically.
+- **BYOK-ready signer** — `ARMOR_SIGNER_KEY_PATH` lets you point at
+  any 32-byte Ed25519 key file, including one served by your KMS
+  (AWS KMS, Azure Key Vault, HashiCorp Vault, on-prem HSM via the
+  filesystem-mount pattern).
+- **Docker deployment** — `docker compose up -d`, `/health` returns
+  200 within ~10 seconds on the first attempt.
+- **WASM plugin loading** — `armor plugins list` and `armor plugins
+  validate <file.wasm>`.
 
-- `POST /v1/inspect`
-- `GET /v1/audit`
-- `GET /v1/audit/export`
-- `GET /v1/audit/stats`
-- `GET /v1/reviews`
+Run the smoke yourself, every claim above is reproducible from a
+clean checkout.
 
-### Profiles And Policies
+### What Agent Armor Enterprise adds (separate commercial repository)
 
-- `GET/POST /v1/profiles`
-- `GET/PUT/DELETE /v1/profiles/:id`
-- `GET/POST /v1/workspaces`
-- `GET/PUT/DELETE /v1/workspaces/:id`
-- `GET/POST /v1/workspaces/:id/rules`
-- `GET /v1/templates`
-- `GET /v1/templates/:name`
+Verifiable on request with a sandbox instance — these are concrete
+modules, not promises. Each lives in a separate commercial repo and
+is not feasible to reimplement quickly from the OSS surface alone:
 
-### Response Security
+- **EU AI Act + GDPR + DORA compliance evidence engine.** Generates
+  Annex IV dossiers, RoPA, DPIA, post-market monitoring reports,
+  EU AI Office incident notifications. PDF + JSON-LD output, signed
+  with qualified e-signatures (eIDAS). Tied to the OSS receipt
+  schema so dossiers cite the chain that produced them.
+- **DPO Dashboard.** Web app for human-in-the-loop review queues,
+  escalation, SLA timers, audit-trailed approvals signed Ed25519 for
+  non-repudiation.
+- **Multi-tenant isolation paths.** Schema-per-tenant DB layer,
+  per-tenant resource quotas, cross-tenant audit isolation,
+  tenant lifecycle management.
+- **Enterprise SSO.** SAML 2.0 + OIDC + SCIM provisioning,
+  fine-grained RBAC with role inheritance, MFA enforcement,
+  IP allowlist per tenant.
+- **eIDAS qualified signature pipeline.** ETSI EN 319 132
+  (XAdES / PAdES / CAdES), Long-Term Validation profile, connectors
+  to specific EU Trust Service Providers. Receipts gain legal
+  weight in EU jurisdictions.
+- **Native SIEM connectors.** Splunk, Datadog, Elastic, Sentinel,
+  Chronicle. Field mappings done; not "send us a webhook".
+- **Air-gapped distribution.** Offline update channel with signed
+  bundle delivery, custom installer, air-gap registry, bundle
+  verification chain.
+- **Founder-led support.** SLA 99.95%, 24/7 oncall handled by the
+  same team that wrote the kernel. No tier-1 ticket triage.
+- **Iaga Cloud managed deployment** — when you do not want to run
+  the box yourself.
 
-- `POST /v1/response/scan`
-- `GET /v1/response/patterns`
+The compliance pieces require a compliance officer + EU regulatory
+lawyer kept current as the regulator publishes new guidelines. That
+work is what you are paying for, on top of the code itself.
 
-### Runtime Controls
+### Open-core promise
 
-- `GET /v1/rate-limit/status/:agent_id`
-- `GET/POST /v1/rate-limit/config`
-- `GET /v1/firewall/stats`
-- `POST /v1/firewall/scan`
-- `GET /v1/telemetry/spans`
-- `GET /v1/events/stream`
-- `GET /v1/plugins`
-- `POST /v1/plugins/reload`
+The governance kernel (receipt schema, replay algorithm, APL
+evaluator, reasoning framework, BYOK signer support, the eBPF loader
+when it ships in 1.0.1, the single-cluster mesh when it ships in 1.1)
+is the open-source build of Agent Armor. It is licensed under
+**BUSL-1.1** with **Change License: Apache-2.0** baked into the
+licence itself: four years after publication every release converts
+automatically and irrevocably to Apache-2.0. No manual switch, no
+walk-back possible.
 
-### Identity And Auth
+Enterprise never gates the security fundamentals. The promise is
+documented in [`AGENT_ARMOR_1.0.md`](AGENT_ARMOR_1.0.md) §9 so future
+founders cannot rewrite it.
 
-- `GET/POST /v1/auth/keys`
-- `DELETE /v1/auth/keys/:id`
-- `GET/POST /v1/nhi/identities`
-- `POST /v1/nhi/attest`
-- `POST /v1/nhi/challenge`
-- `POST /v1/nhi/verify`
+### Why Enterprise exists
 
-## Testing And Verification
+For teams in regulated environments (banks, insurers, healthcare,
+public sector, critical infrastructure), the question is not *"can
+we be compliant"* — OSS answers that. The question is *"can we
+**prove** it to the auditor / notified body / DPO / regulator
+within two weeks instead of six months"*. Enterprise turns the OSS
+mechanisms into the dossiers, dashboards, and signed evidence packs
+that the EU AI Act, GDPR, and DORA ask for in their acceptance
+language, and gives you a phone number to the people who wrote the
+governance kernel when something goes wrong.
 
-`0.4.0` is verified at four layers plus SDK and plugin-path smoke checks:
+See [`ENTERPRISE.md`](ENTERPRISE.md) for the full Enterprise pitch
+and the EU AI Act / GDPR / DORA article-by-article mapping. Contact:
+`enterprise@iaga.start@gmail.com`.
 
-- unit tests
-- property tests
-- direct integration tests
-- live HTTP end-to-end tests
-- CLI tests
-- example plugin compilation and execution tests
-- TypeScript SDK build
-- Python SDK compile smoke
-
-Current automated coverage:
-
-- `99` unit tests
-- `19` property tests
-- `10` integration tests
-- `8` end-to-end HTTP tests
-- `3` CLI tests
-- `2` example plugin tests
-
-Total: `173` Rust tests plus TypeScript and Python SDK build checks.
-
-Run them with:
-
-```bash
-cd community
-
-# Full Rust suite
-cargo test --features plugins
-
-# Example plugin validation only
-cargo test --features plugins --test plugin_example_tests
-
-# HTTP E2E only
-cargo test --test e2e_http_tests
-
-# PostgreSQL build verification
-cargo check --features postgres
-
-# TypeScript SDK build
-cd ../sdks/typescript && npm run build
-
-# Python SDK compile smoke
-cd ../python && python -m compileall agent_armor
-```
-
-The HTTP and integration tests exercise real authenticated requests, persisted
-workspace rules, same-session sequence behavior, real plugin directories, and
-`pluginResults` propagation in governance responses.
-
-## Open-Core Boundary
-
-Community keeps:
-
-- runtime governance
-- storage backends
-- migrations
-- logging and observability basics
-- CLI, HTTP API, MCP proxy, dashboard, SDKs, adapters, and tests
-
-Community does not currently include:
-
-- multi-tenant isolation
-- SSO, SAML, JWT, or RBAC
-- SIEM integrations
-- ML firewall features
-- enterprise admin UX
-
-## Contributing
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+---
 
 ## License
 
-[Business Source License 1.1](LICENSE)
+The open-source build of Agent Armor is licensed under
+[**Business Source License 1.1**](LICENSE) with **Change License:
+Apache-2.0** and a **Change Date** of four years from publication.
+What that means in plain English:
 
-## Disclaimer
+- You can run, copy, modify, and redistribute Agent Armor freely for
+  internal use, research, evaluation, and any non-production use.
+- You can run Agent Armor in production *as long as your use does not
+  consist of offering Agent Armor itself to third parties as a hosted
+  or managed service that exposes a substantial set of its features*
+  (see the Additional Use Grant in [`LICENSE`](LICENSE)). Building
+  your own product *on top of* Agent Armor for your customers is
+  fine.
+- Four years after each release is published, that specific release
+  converts automatically and irrevocably to **Apache-2.0**. The
+  conversion is written into the licence itself, so it is not
+  something we can walk back later.
 
-Agent Armor is a governance layer, not a complete security program. Use it as
-part of a broader security posture.
+Agent Armor Enterprise is sold under a separate commercial agreement.
+The two share the same kernel; Enterprise adds modules that live in a
+separate repository and are not covered by this licence.
+
+Repository: <https://github.com/EdoardoBambini/Agent-Armor-Iaga>
+Contact: `iaga.start@gmail.com`
