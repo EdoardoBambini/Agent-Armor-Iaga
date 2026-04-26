@@ -70,5 +70,6 @@ tests in `armor-core`.
 
 ## License
 
-BUSL-1.1 today (workspace default). Switch to Apache-2.0 at the 1.0 GA
-commit per [ADR 0002](../../docs/adr/0002-open-source-license-and-scope.md).
+BUSL-1.1 with Change License: Apache-2.0 baked into the licence
+itself (auto-converts four years after each release is published).
+See [ADR 0002](../../docs/adr/0002-open-source-license-and-scope.md).

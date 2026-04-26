@@ -17,32 +17,32 @@
 
 Questa ADR chiude le quattro. Filosofia guida: **"open source assurdo e inevitabile"** → adozione default, zero frizione legale, ship veloce di un nucleo eccellente, monetizzazione su strato enterprise/managed separato.
 
-## Decisione 1 — Licenza core: **target Apache-2.0** al GA
+## Decisione 1 — Licenza core: **BUSL-1.1 con Change License: Apache-2.0 baked-in**
 
 ### Posizione finale
 
-Il core (`armor-core`, `armor-receipts`, `armor-apl`, `armor-reasoning`, `armor-kernel`) va su **Apache-2.0** al momento del release 1.0 GA.
+Il core (`armor-core`, `armor-receipts`, `armor-apl`, `armor-reasoning`, `armor-kernel`) ships su **BUSL-1.1** con **Change License: Apache-2.0** scritta nella licenza stessa e **Change Date: quattro anni dopo la pubblicazione** di ogni release.
 
-### Perché
+Tradotto: ogni versione del codice converte automaticamente e irrevocabilmente ad Apache-2.0 quattro anni dopo la sua pubblicazione. La transizione è scritta nel file `LICENSE` (riga 16) — non serve un commit di switch al Change Date, non serve azione legale, non serve approvazione di nessuno. È legalmente vincolante dal momento del primo push.
 
-BUSL-1.1 sul runtime è incompatibile con la tesi di "infrastruttura default":
+### Perché questa è la scelta migliore vs Apache-2.0 secco
 
-- **Cloud provider** (AWS/GCP/Azure) non integrano BUSL su piattaforme managed — perdita automatica di un canale distributivo enorme.
-- **Backlash documentato**: MongoDB → SSPL, Elastic → SSPL, Redis → RSAL, HashiCorp → BUSL. In ogni caso: forchette (OpenSearch, Valkey, OpenTofu) o caduta di trust. Armor non ha leva di mercato per sostenere un simile attrito.
-- **CNCF / OpenSSF alignment**: Kubernetes, Envoy, Prometheus, OpenTelemetry, Terraform-OSS sono tutti Apache-2.0. Per giocare in quella lega serve lo stesso licensing.
-- **Contribuzioni OSS**: CLA + licenza non-OSI = zero PR esterne serie, zero integrazioni downstream.
-- **Patent grant di Apache-2.0** è esplicito (art. 3), cosa che manca in MIT/BSD e tutela meglio i contributor.
+- **Protezione anti-strip-mining oggi.** BUSL-1.1 impedisce a un hyperscaler di prendere il codice oggi, hostarlo come servizio managed concorrente, e drenare il TAM di Iaga Cloud prima ancora che ci siano clienti. Apache-2.0 secco non avrebbe quella protezione.
+- **Promessa OSS reale e legalmente vincolante.** Il Change Date significa che chiunque adotti Agent Armor oggi sa con certezza che fra quattro anni il codice diventa Apache-2.0. Non è un "trust me bro", è scritto nel testo legale che firma la release.
+- **Zero rischio di rebrand backlash.** Niente switch, niente cambio improvviso, niente "Community Edition lite" mai. Il path è già stabilito al momento del commit.
+- **Migration path documentato.** Le release più vecchie diventano Apache-2.0 prima delle più nuove, nello stesso ordine in cui sono state pubblicate. Naturalmente staircase.
 
-### Stato esecutivo
+### Cosa significa in pratica
 
-- Il file `LICENSE` e `Cargo.toml` mantengono **BUSL-1.1** nello stato working-tree corrente (1.0-alpha.1, preview) per ragioni fuori dal controllo della 1.0-alpha.
-- Lo **switch a Apache-2.0 è parte del commit unico di rilascio 1.0 GA** e non va anticipato in milestone intermedie.
-- Da questo momento, nuovi file sorgente sono scritti ipotizzando Apache-2.0 come destinazione (nessun header BUSL nei sorgenti nuovi; i file mantengono il pattern esistente del repo).
+- **Adozione interna / non-production / R&D**: completamente libera dal giorno uno (BUSL Terms § 1).
+- **Adozione production**: libera, salvo il caso di rivendere Agent Armor stesso come servizio managed che esponga "un substantial set" delle sue feature (Additional Use Grant in `LICENSE`). Costruire il *proprio* prodotto sopra Agent Armor è permesso.
+- **Cloud provider** (AWS/GCP/Azure): non possono offrirlo come servizio managed concorrente per quattro anni. Dopo, sì.
+- **Forks / community**: PR esterne benvenute. Il forking di codice già pubblicato resta soggetto a BUSL fino al Change Date di quella specifica release.
 
 ### Monetizzazione
 
-- `armor-enterprise` (repo privato, non in questo workspace): multi-tenant managed, compliance packs, SLA 24/7, SSO/SAML, audit export packaged, support commerciale. Licenza: proprietaria o BUSL-1.1 a scelta, indipendente dal core.
-- `armor-mesh` (quando arriverà in 1.1): decisione di licenza rinviata ma orientata anch'essa ad Apache-2.0 per coerenza.
+- `armor-enterprise` (repo privato, non in questo workspace): multi-tenant managed, compliance packs, SLA 24/7, SSO/SAML, audit export packaged, support commerciale. Licenza: commerciale separata, indipendente dal core.
+- `armor-mesh` (quando arriverà in 1.1): stesso pattern del core (BUSL-1.1 con Change License: Apache-2.0).
 
 ## Decisione 2 — ML plane: **feature-flag `ml` opzionale**, default off
 

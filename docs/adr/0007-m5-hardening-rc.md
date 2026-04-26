@@ -71,7 +71,7 @@ Questo NON cambia il comportamento di `armor serve`, che ha già il flag `--seed
 - ❌ **Cross-platform kernel** (macOS Endpoint Security, Windows ETW). 1.1.
 - ❌ **Mesh** (gRPC gossip, federated rate budgets). 1.1.
 - ❌ **KMS / HSM signer backend**. 1.1.
-- ❌ **License switch BUSL → Apache-2.0**. Eseguito al commit unico di release 1.0 GA, deciso fuori da questa ADR (vedi ADR 0002).
+- ❌ **License switch manuale**. Non c'è. La licenza è BUSL-1.1 con Change License: Apache-2.0 baked-in: la transizione è automatica quattro anni dopo ogni release, scritta nel `LICENSE` stesso. Vedi ADR 0002 per il rationale.
 
 ### 6. Posture "1.0 RC"
 

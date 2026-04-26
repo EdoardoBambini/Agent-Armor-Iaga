@@ -7,7 +7,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 For path renames and migration steps from 0.4.0, see [MIGRATION.md](MIGRATION.md).
 For architectural rationale, see the ADRs under [docs/adr/](docs/adr/).
 
-This changelog tracks the **OSS edition** of Agent Armor (Apache-2.0).
+This changelog tracks the **open-source build** of Agent Armor,
+licensed under BUSL-1.1 with Change License: Apache-2.0 baked in.
 Agent Armor Enterprise is a separate commercial product built on the
 same governance kernel; see [`ENTERPRISE.md`](ENTERPRISE.md) for the
 Enterprise pitch and the EU AI Act + GDPR compliance pack mapping.
@@ -82,8 +83,11 @@ deterministic policy decides on.
 
 - **Crate renamed**: package `agent-armor` → `agent-armor-core`. Binary
   name `agent-armor` preserved for backward compatibility.
-- **License**: BUSL-1.1 → Apache-2.0 (executed at the GA commit; see
-  [ADR 0002](docs/adr/0002-open-source-license-and-scope.md)).
+- **License**: stays on BUSL-1.1 with **Change License: Apache-2.0**
+  baked into the licence. Each release converts automatically and
+  irrevocably to Apache-2.0 four years after publication. See
+  [ADR 0002](docs/adr/0002-open-source-license-and-scope.md) for the
+  rationale and [`LICENSE`](LICENSE) for the legal text.
 - **Defense-in-depth model**: 8 layers → 12 layers. The original 8 are
   hardened in M2–M5; M3.5 + M4 add supply chain attestation /
   blast radius enforcement / behavioral baseline / counterparty trust

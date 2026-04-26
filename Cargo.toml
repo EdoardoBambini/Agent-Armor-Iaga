@@ -1,8 +1,9 @@
 # Agent Armor 1.0 — workspace root
 # M1 "Fortezza Foundation" + M2 "Signed Receipts" inside the workspace.
 # Future milestones add: armor-apl (M3), armor-reasoning (M3.5),
-# armor-kernel (M4). Mesh deferred to 1.1. License switch to Apache-2.0
-# executed at 1.0 GA commit (see docs/adr/0002-open-source-license-and-scope.md).
+# armor-kernel (M4). Mesh deferred to 1.1. Licensed under BUSL-1.1
+# with Change License: Apache-2.0 (auto-converts 4 years after each
+# release; see LICENSE + docs/adr/0002-open-source-license-and-scope.md).
 
 [workspace]
 resolver = "2"
@@ -17,7 +18,7 @@ members = [
 [workspace.package]
 version = "1.0.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "BUSL-1.1"
 repository = "https://github.com/EdoardoBambini/Agent-Armor-Iaga"
 authors = ["Edoardo Bambini"]
 

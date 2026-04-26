@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-1.0.0-blue" alt="version" />
-  <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="license" />
+  <img src="https://img.shields.io/badge/license-BUSL--1.1-blue" alt="license" />
   <img src="https://img.shields.io/badge/12%20layers-defense%20in%20depth-green" alt="12 layers" />
   <img src="https://img.shields.io/badge/Rust-stable-orange" alt="Rust" />
 </p>
@@ -239,7 +239,7 @@ inspect, or call against a running instance. Roadmap items (eBPF
 loader, mesh, WASM codegen, curated ML models) are tracked in
 [`CHANGELOG.md`](CHANGELOG.md) under the version where they ship.
 
-### What ships in OSS today (Apache-2.0, this repository)
+### What ships in the open-source build today (this repository)
 
 Verifiable by `git clone && cargo test --workspace && docker compose up -d`:
 
@@ -314,13 +314,18 @@ work is what you are paying for, on top of the code itself.
 
 ### Open-core promise
 
-The governance kernel — receipt schema, replay algorithm, APL
+The governance kernel (receipt schema, replay algorithm, APL
 evaluator, reasoning framework, BYOK signer support, the eBPF loader
-when it ships in 1.0.1, the single-cluster mesh when it ships in 1.1
-— stays **Apache-2.0 forever**. Enterprise never gates the security
-fundamentals. The promise is documented in
-[`AGENT_ARMOR_1.0.md`](AGENT_ARMOR_1.0.md) §9 so future founders cannot
-walk it back.
+when it ships in 1.0.1, the single-cluster mesh when it ships in 1.1)
+is the open-source build of Agent Armor. It is licensed under
+**BUSL-1.1** with **Change License: Apache-2.0** baked into the
+licence itself: four years after publication every release converts
+automatically and irrevocably to Apache-2.0. No manual switch, no
+walk-back possible.
+
+Enterprise never gates the security fundamentals. The promise is
+documented in [`AGENT_ARMOR_1.0.md`](AGENT_ARMOR_1.0.md) §9 so future
+founders cannot rewrite it.
 
 ### Why Enterprise exists
 
@@ -342,13 +347,27 @@ and the EU AI Act / GDPR / DORA article-by-article mapping. Contact:
 
 ## License
 
-The OSS edition (Agent Armor) is licensed under [Apache-2.0](LICENSE).
-See also [`NOTICE`](NOTICE).
+The open-source build of Agent Armor is licensed under
+[**Business Source License 1.1**](LICENSE) with **Change License:
+Apache-2.0** and a **Change Date** of four years from publication.
+What that means in plain English:
 
-Agent Armor Enterprise is sold under a separate commercial license.
-The two share the same source tree where they share code; Enterprise
-adds modules that live in a separate repository and are not covered
-by Apache-2.0.
+- You can run, copy, modify, and redistribute Agent Armor freely for
+  internal use, research, evaluation, and any non-production use.
+- You can run Agent Armor in production *as long as your use does not
+  consist of offering Agent Armor itself to third parties as a hosted
+  or managed service that exposes a substantial set of its features*
+  (see the Additional Use Grant in [`LICENSE`](LICENSE)). Building
+  your own product *on top of* Agent Armor for your customers is
+  fine.
+- Four years after each release is published, that specific release
+  converts automatically and irrevocably to **Apache-2.0**. The
+  conversion is written into the licence itself, so it is not
+  something we can walk back later.
+
+Agent Armor Enterprise is sold under a separate commercial agreement.
+The two share the same kernel; Enterprise adds modules that live in a
+separate repository and are not covered by this licence.
 
 Repository: <https://github.com/EdoardoBambini/Agent-Armor-Iaga>
 Contact: `iaga.start@gmail.com`

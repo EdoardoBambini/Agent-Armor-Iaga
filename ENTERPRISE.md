@@ -2,7 +2,7 @@
 
 > **From governance kernel to audit dossier in 14 days.**
 
-Agent Armor (Apache-2.0) is the open-source kernel: signed receipts,
+Agent Armor (BUSL-1.1, with Change License: Apache-2.0 baked in) is the open-source kernel: signed receipts,
 deterministic policy language, replay, eBPF enforcement on Linux,
 BYOK signer support, single-cluster governance mesh.
 **Agent Armor Enterprise** is the commercial edition built on top.
@@ -302,7 +302,7 @@ This is a commitment, not a feature list:
 
 - Enterprise will **never** gate the governance kernel. eBPF loader,
   receipt schema, replay algorithm, APL evaluator, reasoning framework,
-  governance mesh — these stay Apache-2.0 in OSS.
+  governance mesh — these stay in the open-source kernel under BUSL-1.1 with the automatic Apache-2.0 conversion.
 - Enterprise will **never** require Iaga Cloud. You can run Enterprise
   fully on-prem, air-gapped if you need.
 - Enterprise will **never** introduce a "free with telemetry" tier

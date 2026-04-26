@@ -194,7 +194,7 @@ Timeline realistica da solo: **4–6 mesi** se il kernel resta Linux-only a 1.0 
 3. Gli SDK non sono più autoritativi: in mesh/kernel mode il verdetto SDK può essere scavalcato.
 4. Binary name: resta `agent-armor`, ma `armor` diventa l'alias breve ufficiale.
 5. Branding: "8-layer" → "12-layer defense-in-depth" ovunque (README, sito, SDK docstring, video Remotion).
-6. Licenza: valuta passaggio **BUSL-1.1 → Apache-2.0** per il core, BUSL solo per `armor-mesh` enterprise-grade. Scelta politica, aperta (vedi sezione 7).
+6. Licenza: la 1.0 ships su **BUSL-1.1** con **Change License: Apache-2.0** scritta nella licenza stessa. Ogni release converte automaticamente ad Apache-2.0 quattro anni dopo la pubblicazione. Vedi `LICENSE` + ADR 0002.
 
 ---
 
@@ -205,7 +205,7 @@ Le quattro scelte che bloccavano la forma di 1.0 sono chiuse. Dettagli completi 
 
 1. **Kernel scope** → **Linux-only a 1.0**. Cross-platform (macOS Endpoint Security, Windows ETW+WFP) rinviato a 1.1. macOS/Windows restano in preview userspace via SDK 0.4.0 + process jailing soft.
 2. **Mesh timing** → **tagliata a 1.1**. 1.0 ships single-node. `armor-mesh` arriva come crate indipendente in 1.1 (schema receipt già compatibile con federazione).
-3. **Licenza core** → **target Apache-2.0 al GA**. File `LICENSE` e `Cargo.toml` restano BUSL-1.1 nello stato working-tree corrente; lo switch è parte del commit unico di release 1.0 GA. `armor-enterprise` resta proprietario/BUSL separato.
+3. **Licenza core** → **BUSL-1.1 con Change License: Apache-2.0 baked-in**. La licenza converte automaticamente ad Apache-2.0 quattro anni dopo la pubblicazione di ogni release. Nessuno switch manuale serve, e nessun futuro maintainer può rinegoziare la transizione: è scritta nella licenza stessa. `armor-enterprise` resta sotto licenza commerciale separata.
 4. **ML plane** → **feature-flag `ml` opzionale**, default off. `armor-reasoning` (M3.5) è crate separato; senza `ml` i riferimenti APL `ml.*` risolvono a evidenza mancante.
 
 Roadmap finale: M1 ✅ · M2 ✅ · M3 ✅ · M3.5 ✅ · M4 ✅ · M5 ✅ · M6 ✅ · 1.0 GA pending license switch + commit autorizzato.
@@ -232,7 +232,7 @@ Roadmap finale: M1 ✅ · M2 ✅ · M3 ✅ · M3.5 ✅ · M4 ✅ · M5 ✅ · M6
 
 Agent Armor 1.0 esiste in due edizioni che condividono **lo stesso governance kernel**. La differenza è categoriale, non gating:
 
-### Cosa è e resta **Apache-2.0 forever** (Agent Armor OSS)
+### Cosa è e resta nel kernel open-source (Agent Armor OSS, BUSL-1.1 con Change License Apache-2.0 baked-in)
 
 - Il governance kernel completo: eBPF/LSM loader (1.0.1), `UserspaceKernel` cross-platform, `armor run`, audit pipeline 12-layer.
 - Receipt schema completo: Ed25519 + Merkle log + replay deterministico.

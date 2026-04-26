@@ -75,19 +75,22 @@ chore(ci): cache cargo registry across jobs
 
 ## License and the OSS / Enterprise relationship
 
-Agent Armor (the OSS edition, this repository) is licensed under
-[Apache-2.0](LICENSE). By submitting a contribution you agree to
-license your work under the same terms.
+Agent Armor (the open-source build, this repository) is licensed under
+[Business Source License 1.1](LICENSE) with **Change License:
+Apache-2.0** and a Change Date of four years from publication. By
+submitting a contribution you agree to license your work under the
+same terms.
 
-We do not require a CLA. The Apache-2.0 license already grants the
-patent and copyright terms we need to ship community work.
+We do not require a CLA. BUSL-1.1 plus the automatic Apache-2.0
+conversion baked into the licence is enough to keep the project
+durable for community contributors and forks.
 
 **Agent Armor Enterprise** is a separate commercial product built on
 the same governance kernel. Enterprise modules live in a separate
-repository under a commercial license. Contributions to this OSS repo
+repository under a commercial license. Contributions to this repo
 flow into both editions automatically when they touch the shared
 kernel; the reverse is never true (Enterprise-only code never lands
-here unless it is intentionally re-licensed Apache-2.0).
+here).
 
 What this means in practice for contributors:
 
