@@ -131,6 +131,10 @@ pub async fn execute_pipeline(
         if let Err(e) = state.audit_store.append(&stored).await {
             tracing::error!(event_id = %stored.event_id, error = %e, "Failed to persist audit event");
         }
+        if let Some(rl) = state.receipts.as_ref() {
+            // Fast-path block: no ML evidence at this stage.
+            rl.record(&stored, None).await;
+        }
 
         return Ok(GovernanceResult {
             trace_id,
@@ -612,6 +616,21 @@ pub async fn execute_pipeline(
         minimum_decision = GovernanceDecision::Block;
     }
 
+    // 1.0 M3.5: optional probabilistic reasoning. Produces evidence
+    // consumed by the receipt logger; never fails the pipeline.
+    let ml_outcome = match state.reasoning.as_ref() {
+        Some(eng) => Some(
+            eng.evaluate_json(
+                &input.agent_id,
+                &input.action.tool_name,
+                action_type_str(input.action.action_type),
+                &serde_json::to_string(&input.action.payload).unwrap_or_default(),
+            )
+            .await,
+        ),
+        None => None,
+    };
+
     let risk = score_tool_risk_with_thresholds(
         input,
         minimum_decision,
@@ -624,18 +643,43 @@ pub async fn execute_pipeline(
     // Build audit event
     let mut reasons = risk.reasons.clone();
     reasons.push(format!("agent-role:{:?}", profile.role).to_lowercase());
+
+    // 1.0 M6: APL live overlay. If a policy bundle is loaded on the
+    // host, run it after the YAML risk score and merge stricter-wins.
+    // APL can tighten the verdict; it never relaxes it.
+    let mut decision = risk.decision;
+    #[cfg(feature = "apl")]
+    if let Some(overlay) = state.apl_overlay.as_ref() {
+        let ml_scores = ml_outcome.as_ref().map(|o| &o.scores);
+        let ctx = crate::pipeline::apl_overlay::build_overlay_context(
+            input,
+            risk.score,
+            risk.decision,
+            Some(&workspace_policy.workspace_id),
+            &workspace_policy.allowed_domains,
+            ml_scores,
+        );
+        if let Some(fired) = overlay.evaluate(&ctx) {
+            let merged =
+                crate::pipeline::apl_overlay::merge_decisions(decision, fired.verdict);
+            let reason_str = fired.reason.unwrap_or_else(|| "fired".to_string());
+            reasons.push(format!("apl[{}]: {}", fired.policy_name, reason_str));
+            decision = merged;
+        }
+    }
+
     let audit_event = AuditEvent {
         event_id: Uuid::new_v4().to_string(),
         agent_id: input.agent_id.clone(),
         framework: input.framework.clone(),
         action_type: input.action.action_type,
         tool_name: input.action.tool_name.clone(),
-        decision: risk.decision,
+        decision,
         timestamp: Utc::now().to_rfc3339(),
         reasons,
     };
 
-    let review_status = if risk.decision == GovernanceDecision::Review {
+    let review_status = if decision == GovernanceDecision::Review {
         ReviewStatus::Pending
     } else {
         ReviewStatus::NotRequired
@@ -645,7 +689,9 @@ pub async fn execute_pipeline(
     // LAYER 8 — Telemetry
     // ═══════════════════════════════════════════════════════════════
     let duration_ms = pipeline_start.elapsed().as_millis() as u64;
-    let decision_str = format!("{:?}", risk.decision).to_lowercase();
+    // After M6: use the merged `decision` (YAML + APL stricter-wins) so
+    // telemetry reflects the actual final verdict.
+    let decision_str = format!("{:?}", decision).to_lowercase();
 
     let mut layer_attrs = HashMap::new();
     layer_attrs.insert(
@@ -696,7 +742,7 @@ pub async fn execute_pipeline(
         trace_id: trace_id.clone(),
         protocol,
         normalized_payload,
-        decision: risk.decision,
+        decision,
         review_status,
         risk,
         secret_plan,
@@ -738,6 +784,9 @@ pub async fn execute_pipeline(
         risk_score: result.risk.score,
     };
     state.audit_store.append(&stored).await?;
+    if let Some(rl) = state.receipts.as_ref() {
+        rl.record(&stored, ml_outcome.as_ref()).await;
+    }
 
     // Create review request if needed
     if result.decision == GovernanceDecision::Review {
