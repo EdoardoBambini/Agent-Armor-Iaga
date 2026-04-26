@@ -80,6 +80,10 @@ async fn build_test_state_with_plugin_registry(
         plugin_registry,
         storage_backend: StorageBackend::Sqlite,
         env,
+        receipts: None,
+        reasoning: None,
+        #[cfg(feature = "apl")]
+        apl_overlay: None,
     })
 }
 

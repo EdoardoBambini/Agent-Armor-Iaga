@@ -524,6 +524,29 @@
     color: var(--muted);
   }
 
+  .muted { color: var(--muted); }
+
+  .hint {
+    font-size: 12px;
+    color: var(--muted);
+    background: rgba(88, 200, 255, 0.05);
+    border: 1px solid rgba(88, 200, 255, 0.18);
+    border-radius: 8px;
+    padding: 8px 10px;
+  }
+
+  .kv-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(35, 53, 72, 0.4);
+  }
+  .kv-row:last-child { border-bottom: none; }
+  .kv-key { color: var(--muted); font-size: 13px; }
+  .kv-val { color: var(--text); font-size: 13px; text-align: right; }
+
   @media (max-width: 1240px) {
     .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .split-2,
@@ -767,6 +790,63 @@
           </div>
           <div style="margin-top: 14px;" id="policy-panel"></div>
         </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">M2 — Signed Action Receipts</div>
+              <h3>Receipt Chain</h3>
+              <p>Ed25519-signed Merkle log per run. Each row is a verifiable chain.</p>
+            </div>
+          </div>
+          <div id="receipts-meta" class="stack"></div>
+          <div class="table-wrap" style="margin-top: 12px;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Run</th>
+                  <th>Verdict</th>
+                  <th>Receipts</th>
+                  <th>Last</th>
+                </tr>
+              </thead>
+              <tbody id="receipts-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">M6 — APL Live Overlay</div>
+              <h3>Policy Language</h3>
+              <p>Typed DSL evaluator merged stricter-wins with the YAML profile system.</p>
+            </div>
+          </div>
+          <div id="apl-overlay-panel" class="stack"></div>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">M3.5 — Reasoning Plane</div>
+              <h3>ML Evidence Engine</h3>
+              <p>Probabilistic engine producing evidence; deterministic policy still decides.</p>
+            </div>
+          </div>
+          <div id="reasoning-panel" class="stack"></div>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">M4 — Enforcement Kernel</div>
+              <h3>Kernel Backend</h3>
+              <p>Userspace launcher today; eBPF/LSM loader ships in 1.0.1.</p>
+            </div>
+          </div>
+          <div id="kernel-panel" class="stack"></div>
+        </section>
       </div>
     </main>
   </div>
@@ -982,10 +1062,15 @@ async function refreshData() {
       fetchJson('/v1/telemetry/spans'),
       fetchJson('/v1/webhooks/dlq'),
       fetchJson('/v1/rate-limit/config'),
-      fetchJson('/v1/workspaces')
+      fetchJson('/v1/workspaces'),
+      // 1.0 pillar surfaces
+      fetchJson('/v1/receipts?limit=20'),
+      fetchJson('/v1/policy/overlay'),
+      fetchJson('/v1/reasoning/status'),
+      fetchJson('/v1/kernel/status')
     ]);
 
-    const [audit, reviews, agents, sessions, firewall, threat, telemetryMetrics, telemetrySpans, dlq, rateConfig, workspaces] = responses;
+    const [audit, reviews, agents, sessions, firewall, threat, telemetryMetrics, telemetrySpans, dlq, rateConfig, workspaces, receipts, policyOverlay, reasoningStatus, kernelStatus] = responses;
 
     state.data.audit = Array.isArray(audit.data) ? audit.data : [];
     state.data.reviews = Array.isArray(reviews.data) ? reviews.data : [];
@@ -998,6 +1083,10 @@ async function refreshData() {
     state.data.dlq = Array.isArray(dlq.data) ? dlq.data : [];
     state.data.rateConfig = rateConfig.ok ? rateConfig.data : null;
     state.data.workspaces = Array.isArray(workspaces.data) ? workspaces.data : [];
+    state.data.receipts = receipts.ok ? receipts.data : null;
+    state.data.policyOverlay = policyOverlay.ok ? policyOverlay.data : null;
+    state.data.reasoningStatus = reasoningStatus.ok ? reasoningStatus.data : null;
+    state.data.kernelStatus = kernelStatus.ok ? kernelStatus.data : null;
 
     if (state.data.workspaces.length > 0) {
       const workspaceStillExists = state.data.workspaces.some((workspace) => workspace.workspaceId === state.selectedWorkspaceId);
@@ -1094,6 +1183,122 @@ function renderAll() {
   renderRuntime();
   renderSessions();
   renderPolicyPanel();
+  // 1.0 pillar surfaces
+  renderReceipts();
+  renderAplOverlay();
+  renderReasoning();
+  renderKernel();
+}
+
+function renderReceipts() {
+  const meta = $('receipts-meta');
+  const body = $('receipts-body');
+  if (!meta || !body) return;
+  const r = state.data.receipts;
+  if (!r || !r.enabled) {
+    meta.innerHTML = '<div class="hint">Signed receipts disabled on this build.</div>';
+    body.innerHTML = '';
+    return;
+  }
+  const signer = esc(r.signerKeyId || '(unknown)');
+  const policyHash = esc((r.policyHash || '').slice(0, 32) + '…');
+  meta.innerHTML = `
+    <div class="kv-row"><span class="kv-key">Signer</span><span class="kv-val mono">${signer}</span></div>
+    <div class="kv-row"><span class="kv-key">Policy hash</span><span class="kv-val mono">${policyHash}</span></div>
+  `;
+  const runs = Array.isArray(r.runs) ? r.runs : [];
+  if (runs.length === 0) {
+    body.innerHTML = '<tr><td colspan="4" class="muted">No signed runs yet. Trigger an inspection to see one here.</td></tr>';
+    return;
+  }
+  body.innerHTML = runs.slice(0, 12).map((run) => {
+    const verdict = (run.terminalVerdict || run.terminal_verdict || 'unknown').toString().toLowerCase();
+    const verdictClass = verdict === 'block' ? 'block' : verdict === 'review' ? 'review' : 'allow';
+    const last = run.lastTimestamp || run.last_timestamp || '';
+    const count = run.receiptCount || run.receipt_count || 0;
+    const runId = run.runId || run.run_id || '';
+    return `<tr>
+      <td class="mono">${esc(runId.slice(0, 12))}…</td>
+      <td><span class="badge ${verdictClass}">${esc(verdict)}</span></td>
+      <td>${count}</td>
+      <td class="muted small">${esc(last.slice(0, 19))}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderAplOverlay() {
+  const panel = $('apl-overlay-panel');
+  if (!panel) return;
+  const o = state.data.policyOverlay;
+  if (!o) {
+    panel.innerHTML = '<div class="hint">No data.</div>';
+    return;
+  }
+  if (!o.enabled) {
+    panel.innerHTML = '<div class="hint">APL feature not compiled in this build.</div>';
+    return;
+  }
+  if (!o.loaded) {
+    panel.innerHTML = '<div class="hint">No APL overlay loaded. Start with <code>armor serve --policy &lt;file.apl&gt;</code> to enable.</div>';
+    return;
+  }
+  const hash = esc((o.policyHash || '').slice(0, 32) + '…');
+  panel.innerHTML = `
+    <div class="kv-row"><span class="kv-key">Status</span><span class="kv-val"><span class="badge allow">loaded</span></span></div>
+    <div class="kv-row"><span class="kv-key">Policies</span><span class="kv-val">${o.policyCount}</span></div>
+    <div class="kv-row"><span class="kv-key">Bundle hash</span><span class="kv-val mono">${hash}</span></div>
+    <div class="kv-row"><span class="kv-key">Source</span><span class="kv-val mono small">${esc(o.source || '')}</span></div>
+  `;
+}
+
+function renderReasoning() {
+  const panel = $('reasoning-panel');
+  if (!panel) return;
+  const r = state.data.reasoningStatus;
+  if (!r) {
+    panel.innerHTML = '<div class="hint">No data.</div>';
+    return;
+  }
+  if (!r.enabled) {
+    panel.innerHTML = '<div class="hint">Reasoning plane disabled.</div>';
+    return;
+  }
+  const engineBadge = r.engine === 'noop' ? 'review' : 'allow';
+  const mlBadge = r.mlFeatureCompiled ? 'allow' : 'review';
+  let modelsHtml = '<span class="muted small">no models loaded</span>';
+  if (Array.isArray(r.models) && r.models.length > 0) {
+    modelsHtml = r.models.map((m) =>
+      `<div class="kv-row"><span class="kv-key">${esc(m.name)}</span><span class="kv-val mono small">${esc((m.sha256 || '').slice(0, 16))}…</span></div>`
+    ).join('');
+  }
+  panel.innerHTML = `
+    <div class="kv-row"><span class="kv-key">Engine</span><span class="kv-val"><span class="badge ${engineBadge}">${esc(r.engine)}</span></span></div>
+    <div class="kv-row"><span class="kv-key">ML feature compiled</span><span class="kv-val"><span class="badge ${mlBadge}">${r.mlFeatureCompiled ? 'yes' : 'no'}</span></span></div>
+    <div class="kv-row"><span class="kv-key">Models</span><span class="kv-val">${Array.isArray(r.models) ? r.models.length : 0}</span></div>
+    ${modelsHtml}
+  `;
+}
+
+function renderKernel() {
+  const panel = $('kernel-panel');
+  if (!panel) return;
+  const k = state.data.kernelStatus;
+  if (!k) {
+    panel.innerHTML = '<div class="hint">No data.</div>';
+    return;
+  }
+  if (!k.enabled) {
+    panel.innerHTML = '<div class="hint">Kernel feature not compiled.</div>';
+    return;
+  }
+  const authBadge = k.authoritative ? 'allow' : 'review';
+  const bpfBadge = k.linuxBpfScaffold ? 'allow' : 'review';
+  panel.innerHTML = `
+    <div class="kv-row"><span class="kv-key">Backend</span><span class="kv-val"><span class="badge allow">${esc(k.backend)}</span></span></div>
+    <div class="kv-row"><span class="kv-key">Authoritative</span><span class="kv-val"><span class="badge ${authBadge}">${k.authoritative ? 'yes' : 'soft enforcement'}</span></span></div>
+    <div class="kv-row"><span class="kv-key">linux-bpf scaffold</span><span class="kv-val"><span class="badge ${bpfBadge}">${k.linuxBpfScaffold ? 'compiled' : 'not active'}</span></span></div>
+    <div class="hint" style="margin-top: 8px;">Real eBPF/LSM loader ships in 1.0.1.</div>
+  `;
 }
 
 function renderConnectionState() {

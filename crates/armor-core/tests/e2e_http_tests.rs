@@ -99,6 +99,10 @@ async fn spawn_test_server_with_plugin_registry(
             node_env: NodeEnv::Test,
             default_mode: ServiceMode::Gateway,
         },
+        receipts: None,
+        reasoning: None,
+        #[cfg(feature = "apl")]
+        apl_overlay: None,
     });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

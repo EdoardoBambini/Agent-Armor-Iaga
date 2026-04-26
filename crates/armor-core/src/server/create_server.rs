@@ -202,6 +202,16 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // v0.4.0: WASM Plugins
         .route("/v1/plugins", get(list_plugins_handler))
         .route("/v1/plugins/reload", post(reload_plugins_handler))
+        // ── 1.0 Pillar surfaces ──
+        // M2 — Signed receipts read API
+        .route("/v1/receipts", get(receipts_list_handler))
+        .route("/v1/receipts/{run_id}", get(receipts_run_handler))
+        // M3 / M6 — APL live overlay status
+        .route("/v1/policy/overlay", get(policy_overlay_handler))
+        // M3.5 — Reasoning plane status
+        .route("/v1/reasoning/status", get(reasoning_status_handler))
+        // M4 — Enforcement kernel status
+        .route("/v1/kernel/status", get(kernel_status_handler))
         // Demo
         .route("/v1/demo/scenarios", get(demo_scenarios_handler))
         .route("/v1/demo/run-adapter", post(run_adapter_handler))
@@ -1164,4 +1174,139 @@ async fn add_workspace_rule_handler(
             }
         })),
     ))
+}
+
+// ── 1.0 Pillar surfaces ──
+
+/// M2 — list signed receipt runs. Returns `{ signerKeyId, policyHash,
+/// runs: [...] }`. Empty runs array when receipts feature is disabled
+/// or no runs have been recorded yet.
+#[derive(Deserialize)]
+struct ReceiptsQuery {
+    #[serde(default = "default_receipts_limit")]
+    limit: u32,
+}
+fn default_receipts_limit() -> u32 {
+    50
+}
+
+async fn receipts_list_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<ReceiptsQuery>,
+) -> Json<serde_json::Value> {
+    let runs = match state.receipts.as_ref() {
+        Some(rl) => rl.list_runs_json(q.limit).await,
+        None => serde_json::Value::Array(Vec::new()),
+    };
+    let signer = state
+        .receipts
+        .as_ref()
+        .and_then(|rl| rl.signer_key_id())
+        .unwrap_or_else(|| "(receipts disabled)".to_string());
+    let policy_hash = state
+        .receipts
+        .as_ref()
+        .and_then(|rl| rl.policy_hash())
+        .unwrap_or_else(|| "(receipts disabled)".to_string());
+    Json(serde_json::json!({
+        "enabled": state.receipts.is_some(),
+        "signerKeyId": signer,
+        "policyHash": policy_hash,
+        "runs": runs,
+    }))
+}
+
+async fn receipts_run_handler(
+    State(state): State<Arc<AppState>>,
+    Path(run_id): Path<String>,
+) -> Json<serde_json::Value> {
+    match state.receipts.as_ref() {
+        Some(rl) => Json(rl.get_run_json(&run_id).await),
+        None => Json(serde_json::json!({
+            "enabled": false,
+            "receipts": [],
+            "verify": null,
+        })),
+    }
+}
+
+async fn policy_overlay_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    #[cfg(feature = "apl")]
+    {
+        match state.apl_overlay.as_ref() {
+            Some(overlay) => Json(serde_json::json!({
+                "enabled": true,
+                "loaded": true,
+                "policyCount": overlay.policy_count(),
+                "policyHash": overlay.policy_hash(),
+                "source": overlay.source_path().display().to_string(),
+            })),
+            None => Json(serde_json::json!({
+                "enabled": true,
+                "loaded": false,
+                "policyCount": 0,
+                "policyHash": null,
+                "source": null,
+            })),
+        }
+    }
+    #[cfg(not(feature = "apl"))]
+    {
+        let _ = state;
+        Json(serde_json::json!({
+            "enabled": false,
+            "loaded": false,
+            "policyCount": 0,
+            "policyHash": null,
+            "source": null,
+        }))
+    }
+}
+
+async fn reasoning_status_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let (engine, models) = match state.reasoning.as_ref() {
+        Some(rh) => (
+            rh.engine_name().to_string(),
+            rh.model_digests()
+                .into_iter()
+                .map(|(name, sha)| serde_json::json!({"name": name, "sha256": sha}))
+                .collect::<Vec<_>>(),
+        ),
+        None => ("(none)".to_string(), Vec::new()),
+    };
+    let ml_feature_enabled = cfg!(feature = "ml");
+    Json(serde_json::json!({
+        "enabled": state.reasoning.is_some(),
+        "engine": engine,
+        "models": models,
+        "mlFeatureCompiled": ml_feature_enabled,
+    }))
+}
+
+async fn kernel_status_handler() -> Json<serde_json::Value> {
+    #[cfg(feature = "kernel")]
+    {
+        use armor_kernel::{EnforcementKernel, UserspaceKernel};
+        let k = UserspaceKernel::allow_all();
+        let linux_bpf = cfg!(feature = "linux-bpf") && cfg!(target_os = "linux");
+        Json(serde_json::json!({
+            "enabled": true,
+            "backend": k.backend_name(),
+            "authoritative": k.is_authoritative(),
+            "linuxBpfScaffold": linux_bpf,
+        }))
+    }
+    #[cfg(not(feature = "kernel"))]
+    {
+        Json(serde_json::json!({
+            "enabled": false,
+            "backend": "(disabled)",
+            "authoritative": false,
+            "linuxBpfScaffold": false,
+        }))
+    }
 }

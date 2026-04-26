@@ -1,5 +1,7 @@
 # Stage 1: Build
-FROM rust:1.86-slim-bookworm AS builder
+# Agent Armor 1.0 — workspace build. The runtime binary is `armor`
+# (alias `agent-armor`) from `crates/armor-core`.
+FROM rust:1.94-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y \
     pkg-config \
@@ -8,21 +10,16 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy manifests first for dependency caching
-COPY community/Cargo.toml community/Cargo.lock ./
+# Copy the entire workspace and build in one shot. The dummy-stub
+# dependency-cache trick that earlier versions of this Dockerfile used
+# is fragile across multi-crate workspaces (the second build can fail
+# to rebuild the binary). A single-shot build is slower but reliable.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
 
-# Create dummy source files to build and cache dependencies
-RUN mkdir src && \
-    echo "fn main() {}" > src/main.rs && \
-    echo "" > src/lib.rs && \
-    cargo build --release && \
-    rm -rf src
-
-# Copy real source code
-COPY community/src/ src/
-
-# Build the actual binary
-RUN cargo build --release
+# Build only the production binary we ship. `--locked` enforces that
+# Cargo.lock matches what was committed.
+RUN cargo build --release --bin armor --locked
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -37,21 +34,23 @@ RUN adduser --disabled-password --gecos '' armor
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/agent-armor ./agent-armor
-COPY community/agent-armor.example.yaml ./agent-armor.yaml
+COPY --from=builder /app/target/release/armor ./armor
+COPY crates/armor-core/agent-armor.example.yaml ./agent-armor.yaml
+COPY crates/armor-apl/examples /app/examples/apl
+COPY crates/armor-core/examples/policies /app/examples/policies
 
-RUN mkdir -p /app/data && chown armor:armor /app/data
+RUN mkdir -p /app/data /home/armor/.armor/keys && \
+    chown -R armor:armor /app/data /home/armor/.armor
 
 USER armor
 
 ENV PORT=4010
 ENV DATABASE_URL=sqlite:///app/data/agent_armor.db?mode=rwc
-ENV AGENT_ARMOR_OPEN_MODE=false
 
 EXPOSE 4010
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:4010/health || exit 1
 
-ENTRYPOINT ["./agent-armor"]
+ENTRYPOINT ["./armor"]
 CMD ["serve"]

@@ -11,6 +11,8 @@ use agent_armor::events::webhooks::{self, WebhookManager};
 use agent_armor::modules::fingerprint::behavioral::BehavioralEngine;
 use agent_armor::modules::rate_limit::limiter::RateLimiter;
 use agent_armor::modules::threat_intel::feed::ThreatFeed;
+use agent_armor::pipeline::reasoning::try_build_reasoning_engine;
+use agent_armor::pipeline::receipts::try_build_receipt_logger;
 use agent_armor::plugins::{LoadedPlugin, PluginRegistry};
 use agent_armor::server::app_state::AppState;
 use agent_armor::server::create_server::create_router;
@@ -132,6 +134,12 @@ enum Commands {
         /// Seed demo data on first boot
         #[arg(long, default_value_t = true)]
         seed_demo: bool,
+
+        /// 1.0 M6 — load an APL policy file as an overlay on top of YAML.
+        /// Stricter wins: APL can tighten the verdict, never relax it.
+        #[cfg(feature = "apl")]
+        #[arg(long, value_name = "FILE")]
+        policy: Option<String>,
     },
 
     /// Inspect a single payload through the governance pipeline
@@ -208,6 +216,97 @@ enum Commands {
         #[arg(long, default_value_t = true)]
         seed_demo: bool,
     },
+
+    /// 1.0 M3 — work with .apl policy files (parse, validate, dry-run)
+    #[cfg(feature = "apl")]
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommands,
+    },
+
+    /// 1.0 M3.5 — inspect the configured probabilistic reasoning engine
+    #[cfg(feature = "reasoning")]
+    Reasoning {
+        #[command(subcommand)]
+        command: ReasoningCommands,
+    },
+
+    /// 1.0 M4 — launch a child process under the enforcement kernel
+    #[cfg(feature = "kernel")]
+    Run {
+        /// Agent identity that owns the launched process for governance purposes
+        #[arg(short, long, default_value = "cli-runner")]
+        agent_id: String,
+
+        /// Optional working directory for the child
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// Program to execute, followed by its arguments after `--`
+        #[arg(trailing_var_arg = true, required = true)]
+        cmd: Vec<String>,
+    },
+
+    /// 1.0 M4 — show kernel backend status
+    #[cfg(feature = "kernel")]
+    Kernel {
+        #[command(subcommand)]
+        command: KernelCommands,
+    },
+
+    /// 1.0 M2 — verify or replay a signed receipt chain for a run_id
+    #[cfg(feature = "receipts")]
+    Replay {
+        /// run_id (event_id in M2) whose receipts should be inspected
+        run_id: Option<String>,
+
+        /// Only verify signatures and Merkle links; no drift check
+        #[arg(long, default_value_t = false)]
+        verify_only: bool,
+
+        /// List known runs instead of replaying one
+        #[arg(long, default_value_t = false)]
+        list: bool,
+
+        /// Max runs to list
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+}
+
+#[cfg(feature = "apl")]
+#[derive(Subcommand)]
+enum PolicyCommands {
+    /// Parse, validate and optionally dry-run an .apl file.
+    Test {
+        /// Path to the .apl source file
+        path: String,
+
+        /// Optional JSON file providing the evaluation context
+        /// (`action`, `workspace`, etc.). When omitted, only parse+validate run.
+        #[arg(long)]
+        context: Option<String>,
+    },
+    /// Lint an .apl file: parse + validate only, no execution.
+    /// 1.0 M6 — semantic alias for `armor policy test <file>` without --context.
+    Lint {
+        /// Path to the .apl source file
+        path: String,
+    },
+}
+
+#[cfg(feature = "reasoning")]
+#[derive(Subcommand)]
+enum ReasoningCommands {
+    /// Print engine name and loaded model digests.
+    Info,
+}
+
+#[cfg(feature = "kernel")]
+#[derive(Subcommand)]
+enum KernelCommands {
+    /// Print backend name and whether enforcement is authoritative.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -255,13 +354,31 @@ async fn main() {
 
     match cli.command {
         None | Some(Commands::Serve { .. }) => {
+            #[cfg(feature = "apl")]
+            let (port_override, seed_demo, policy_path) = match &cli.command {
+                Some(Commands::Serve {
+                    port,
+                    seed_demo,
+                    policy,
+                    ..
+                }) => (*port, *seed_demo, policy.clone()),
+                _ => (None, true, None),
+            };
+            #[cfg(not(feature = "apl"))]
             let (port_override, seed_demo) = match &cli.command {
                 Some(Commands::Serve {
                     port, seed_demo, ..
                 }) => (*port, *seed_demo),
                 _ => (None, true),
             };
-            cmd_serve(&db_url, port_override, seed_demo).await;
+            cmd_serve(
+                &db_url,
+                port_override,
+                seed_demo,
+                #[cfg(feature = "apl")]
+                policy_path.as_deref(),
+            )
+            .await;
         }
         Some(Commands::Inspect { source }) => {
             let code = cmd_inspect(&source, &db_url).await;
@@ -302,6 +419,42 @@ async fn main() {
         }
         Some(Commands::McpServer { seed_demo }) => {
             cmd_mcp_server(&db_url, seed_demo).await;
+        }
+        #[cfg(feature = "apl")]
+        Some(Commands::Policy { command }) => match command {
+            PolicyCommands::Test { path, context } => {
+                let code = cmd_policy_test(&path, context.as_deref());
+                process::exit(code);
+            }
+            PolicyCommands::Lint { path } => {
+                let code = cmd_policy_test(&path, None);
+                process::exit(code);
+            }
+        },
+        #[cfg(feature = "reasoning")]
+        Some(Commands::Reasoning { command }) => match command {
+            ReasoningCommands::Info => {
+                cmd_reasoning_info();
+            }
+        },
+        #[cfg(feature = "kernel")]
+        Some(Commands::Run { agent_id, cwd, cmd }) => {
+            let code = cmd_kernel_run(&db_url, &agent_id, cwd.as_deref(), &cmd).await;
+            process::exit(code);
+        }
+        #[cfg(feature = "kernel")]
+        Some(Commands::Kernel { command }) => match command {
+            KernelCommands::Status => cmd_kernel_status(),
+        },
+        #[cfg(feature = "receipts")]
+        Some(Commands::Replay {
+            run_id,
+            verify_only,
+            list,
+            limit,
+        }) => {
+            let code = cmd_replay(&db_url, run_id.as_deref(), verify_only, list, limit).await;
+            process::exit(code);
         }
     }
 }
@@ -362,13 +515,18 @@ fn print_banner(port: u16) {
     eprintln!("    {green}▸{reset} Port        {bold}{port}{reset}");
     eprintln!("    {green}▸{reset} Dashboard   {cyan}http://localhost:{port}{reset}");
     eprintln!("    {green}▸{reset} API         {cyan}http://localhost:{port}/v1/inspect{reset}");
-    eprintln!("    {green}▸{reset} 8 Layers    {green}ARMED{reset}");
+    eprintln!("    {green}▸{reset} 12 Layers   {green}ARMED{reset}");
     eprintln!();
     eprintln!("    {dim}Press Ctrl+C to shut down{reset}");
     eprintln!();
 }
 
-async fn cmd_serve(db_url: &str, port_override: Option<u16>, seed_demo: bool) {
+async fn cmd_serve(
+    db_url: &str,
+    port_override: Option<u16>,
+    seed_demo: bool,
+    #[cfg(feature = "apl")] policy_path: Option<&str>,
+) {
     let mut app_env = load_env();
     if let Some(p) = port_override {
         app_env.port = p;
@@ -548,6 +706,43 @@ async fn cmd_serve(db_url: &str, port_override: Option<u16>, seed_demo: bool) {
         "Threat intelligence feed loaded"
     );
 
+    // 1.0 M6: load APL overlay if --policy was provided. Fail-fast on any
+    // load error: if the operator asked for APL, they want APL. Loaded
+    // *before* the receipt logger so the bundle digest can be embedded
+    // in every receipt's `policy_hash` field.
+    #[cfg(feature = "apl")]
+    let apl_overlay: Option<Arc<agent_armor::pipeline::apl_overlay::AplOverlay>> =
+        match policy_path {
+            None => None,
+            Some(p) => {
+                use agent_armor::pipeline::apl_overlay::AplOverlay;
+                match AplOverlay::load(std::path::Path::new(p)) {
+                    Ok(o) => {
+                        tracing::info!(
+                            policies = o.policy_count(),
+                            hash = o.policy_hash(),
+                            source = %o.source_path().display(),
+                            "M6: APL policy overlay loaded"
+                        );
+                        Some(Arc::new(o))
+                    }
+                    Err(e) => {
+                        eprintln!("APL load failed: {}", e);
+                        process::exit(2);
+                    }
+                }
+            }
+        };
+
+    #[cfg(feature = "apl")]
+    let policy_hash_override =
+        apl_overlay.as_ref().map(|o| o.policy_hash().to_string());
+    #[cfg(not(feature = "apl"))]
+    let policy_hash_override: Option<String> = None;
+
+    let receipts = try_build_receipt_logger(db_url, policy_hash_override).await;
+    let reasoning = try_build_reasoning_engine();
+
     let state = Arc::new(AppState {
         audit_store: storage.audit_store,
         review_store: storage.review_store,
@@ -567,6 +762,10 @@ async fn cmd_serve(db_url: &str, port_override: Option<u16>, seed_demo: bool) {
         plugin_registry: Arc::new(PluginRegistry::default()),
         storage_backend: storage.storage_backend,
         env: app_env,
+        receipts,
+        reasoning,
+        #[cfg(feature = "apl")]
+        apl_overlay,
     });
 
     let router = create_router(state.clone());
@@ -657,6 +856,11 @@ async fn cmd_inspect(source: &str, db_url: &str) -> i32 {
         }
     };
 
+    let receipts = try_build_receipt_logger(db_url, None).await;
+    let reasoning = try_build_reasoning_engine();
+    #[cfg(feature = "apl")]
+    let apl_overlay: Option<Arc<agent_armor::pipeline::apl_overlay::AplOverlay>> = None;
+
     let state = Arc::new(AppState {
         audit_store: storage.audit_store,
         review_store: storage.review_store,
@@ -678,6 +882,10 @@ async fn cmd_inspect(source: &str, db_url: &str) -> i32 {
         plugin_registry: Arc::new(PluginRegistry::default()),
         storage_backend: storage.storage_backend,
         env: load_env(),
+        receipts,
+        reasoning,
+        #[cfg(feature = "apl")]
+        apl_overlay,
     });
 
     match execute_pipeline(&payload, &state).await {
@@ -1144,6 +1352,11 @@ async fn cmd_proxy(db_url: &str, agent_id: &str, command: &str, args: Vec<String
         webhooks::DeadLetterQueue::new(),
     )));
 
+    let receipts = try_build_receipt_logger(db_url, None).await;
+    let reasoning = try_build_reasoning_engine();
+    #[cfg(feature = "apl")]
+    let apl_overlay: Option<Arc<agent_armor::pipeline::apl_overlay::AplOverlay>> = None;
+
     let state = Arc::new(AppState {
         audit_store: storage.audit_store,
         review_store: storage.review_store,
@@ -1163,6 +1376,10 @@ async fn cmd_proxy(db_url: &str, agent_id: &str, command: &str, args: Vec<String
         plugin_registry: Arc::new(PluginRegistry::default()),
         storage_backend: storage.storage_backend,
         env: load_env(),
+        receipts,
+        reasoning,
+        #[cfg(feature = "apl")]
+        apl_overlay,
     });
 
     let config = McpProxyConfig {
@@ -1195,6 +1412,11 @@ async fn cmd_mcp_server(db_url: &str, seed_demo: bool) {
         webhooks::DeadLetterQueue::new(),
     )));
 
+    let receipts = try_build_receipt_logger(db_url, None).await;
+    let reasoning = try_build_reasoning_engine();
+    #[cfg(feature = "apl")]
+    let apl_overlay: Option<Arc<agent_armor::pipeline::apl_overlay::AplOverlay>> = None;
+
     let state = Arc::new(AppState {
         audit_store: storage.audit_store,
         review_store: storage.review_store,
@@ -1214,6 +1436,10 @@ async fn cmd_mcp_server(db_url: &str, seed_demo: bool) {
         plugin_registry: Arc::new(PluginRegistry::default()),
         storage_backend: storage.storage_backend,
         env: load_env(),
+        receipts,
+        reasoning,
+        #[cfg(feature = "apl")]
+        apl_overlay,
     });
 
     if let Err(e) = run_mcp_server(state).await {
@@ -1266,6 +1492,413 @@ async fn auto_import_config(policy_store: &Arc<dyn PolicyStore>) {
                 "Config imported"
             );
             break;
+        }
+    }
+}
+
+#[cfg(feature = "apl")]
+fn cmd_policy_test(path: &str, context_path: Option<&str>) -> i32 {
+    use armor_apl::{compile, evaluate_program, Context, EvalBudget};
+
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("armor policy test: cannot read {}: {}", path, e);
+            return 2;
+        }
+    };
+    let program = match compile(&src) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    println!(
+        "OK  parsed {} polic{}  from {}",
+        program.policies.len(),
+        if program.policies.len() == 1 { "y" } else { "ies" },
+        path
+    );
+    for p in &program.policies {
+        println!("  - {} \u{2192} {:?}", p.name, p.action.verdict);
+    }
+
+    let Some(ctx_path) = context_path else {
+        return 0;
+    };
+    let ctx_raw = match std::fs::read_to_string(ctx_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("armor policy test: cannot read context {}: {}", ctx_path, e);
+            return 2;
+        }
+    };
+    let ctx_json: serde_json::Value = match serde_json::from_str(&ctx_raw) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("armor policy test: context is not valid JSON: {}", e);
+            return 2;
+        }
+    };
+    let ctx = Context::from_value(ctx_json);
+    let mut budget = EvalBudget::default();
+    match evaluate_program(&program, &ctx, &mut budget) {
+        Ok(Some(fired)) => {
+            println!(
+                "FIRE  policy={}  verdict={:?}  reason={:?}",
+                fired.policy_name, fired.verdict, fired.reason
+            );
+            if let Some(ev) = fired.evidence {
+                println!("       evidence={}", ev);
+            }
+            0
+        }
+        Ok(None) => {
+            println!("MISS  no policy fired");
+            0
+        }
+        Err(e) => {
+            eprintln!("EVAL ERR  {}", e);
+            1
+        }
+    }
+}
+
+#[cfg(feature = "reasoning")]
+fn cmd_reasoning_info() {
+    let Some(eng) = try_build_reasoning_engine() else {
+        println!("no reasoning engine configured");
+        return;
+    };
+    println!("engine: {}", eng.engine_name());
+    let digests = eng.model_digests();
+    if digests.is_empty() {
+        println!("models: 0 (engine active, no models loaded)");
+        if cfg!(feature = "ml") {
+            println!(
+                "  hint: set ARMOR_REASONING_MODELS=name1:/path/to/a.onnx,name2:/path/to/b.onnx"
+            );
+        } else {
+            println!("  hint: rebuild with --features ml to load ONNX models");
+        }
+        return;
+    }
+    println!("models: {}", digests.len());
+    for (name, sha) in digests {
+        println!("  - {:<24} sha256={}", name, sha);
+    }
+}
+
+#[cfg(feature = "kernel")]
+fn cmd_kernel_status() {
+    use armor_kernel::{EnforcementKernel, UserspaceKernel};
+    let k = UserspaceKernel::allow_all();
+    println!("backend: {}", k.backend_name());
+    println!(
+        "authoritative: {}",
+        if k.is_authoritative() { "yes" } else { "no (soft enforcement)" }
+    );
+    if cfg!(feature = "linux-bpf") && cfg!(target_os = "linux") {
+        println!("linux-bpf: scaffold compiled (loader pending M4.1)");
+    } else {
+        println!("linux-bpf: not active on this build");
+    }
+}
+
+#[cfg(feature = "kernel")]
+async fn cmd_kernel_run(
+    db_url: &str,
+    agent_id: &str,
+    cwd: Option<&str>,
+    cmd: &[String],
+) -> i32 {
+    use agent_armor::core::types::{
+        ActionDetail, ActionType, GovernanceDecision, InspectRequest,
+    };
+    use agent_armor::pipeline::execute_pipeline::execute_pipeline;
+    use armor_kernel::{
+        EnforcementKernel, KernelDecision, PolicyCheck, ProcessSpec, UserspaceKernel,
+    };
+
+    if cmd.is_empty() {
+        eprintln!("armor run: missing command after `--`");
+        return 2;
+    }
+    let (program, args) = (cmd[0].clone(), cmd[1..].to_vec());
+    let spec = ProcessSpec {
+        agent_id: agent_id.to_string(),
+        program: program.clone(),
+        args: args.clone(),
+        working_dir: cwd.map(|s| s.to_string()),
+        env: Vec::new(),
+    };
+
+    // M5: build a real AppState so the policy callback can run the
+    // governance pipeline. Receipts produced by the pipeline (M2) are
+    // signed and chained per launch automatically.
+    let storage = match init_storage_bundle(db_url).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[armor run] storage init failed: {e}");
+            return 3;
+        }
+    };
+    // First-run convenience: if no profiles exist yet, seed the demo set
+    // so `armor run` works out of the box without requiring a separate
+    // `armor migrate` + import step.
+    seed_demo_data(&storage.policy_store).await;
+    let receipts = try_build_receipt_logger(db_url, None).await;
+    let reasoning = try_build_reasoning_engine();
+    #[cfg(feature = "apl")]
+    let apl_overlay: Option<Arc<agent_armor::pipeline::apl_overlay::AplOverlay>> = None;
+    let event_bus = EventBus::new(16);
+    let webhook_manager = Arc::new(WebhookManager::new(Arc::new(
+        webhooks::DeadLetterQueue::new(),
+    )));
+    let state = Arc::new(AppState {
+        audit_store: storage.audit_store,
+        review_store: storage.review_store,
+        policy_store: storage.policy_store,
+        api_key_store: storage.api_key_store,
+        tenant_store: storage.tenant_store,
+        nhi_store: storage.nhi_store,
+        session_store: storage.session_store,
+        taint_store: storage.taint_store,
+        fingerprint_store: storage.fingerprint_store,
+        rate_limit_store: storage.rate_limit_store,
+        event_bus,
+        webhook_manager,
+        behavioral_engine: Arc::new(BehavioralEngine::new()),
+        rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
+        threat_feed: Arc::new(ThreatFeed::with_builtin_indicators()),
+        plugin_registry: Arc::new(PluginRegistry::default()),
+        storage_backend: storage.storage_backend,
+        env: load_env(),
+        receipts,
+        reasoning,
+        #[cfg(feature = "apl")]
+        apl_overlay,
+    });
+
+    // Policy callback: synthesize an InspectRequest from the ProcessSpec
+    // and run it through the governance pipeline. Pipeline verdict maps
+    // 1:1 onto KernelDecision; the pipeline also writes a signed receipt
+    // for this launch as a side effect (M2 dual-write).
+    let state_for_cb = state.clone();
+    let policy: PolicyCheck = Arc::new(move |spec: &ProcessSpec| {
+        let state = state_for_cb.clone();
+        let mut payload = std::collections::HashMap::new();
+        payload.insert(
+            "program".to_string(),
+            serde_json::Value::String(spec.program.clone()),
+        );
+        payload.insert(
+            "args".to_string(),
+            serde_json::Value::Array(
+                spec.args
+                    .iter()
+                    .map(|a| serde_json::Value::String(a.clone()))
+                    .collect(),
+            ),
+        );
+        if let Some(cwd) = &spec.working_dir {
+            payload.insert(
+                "cwd".to_string(),
+                serde_json::Value::String(cwd.clone()),
+            );
+        }
+        let request = InspectRequest {
+            agent_id: spec.agent_id.clone(),
+            tenant_id: None,
+            workspace_id: None,
+            framework: "armor-kernel".into(),
+            protocol: None,
+            action: ActionDetail {
+                action_type: ActionType::Shell,
+                tool_name: spec.program.clone(),
+                payload,
+            },
+            requested_secrets: None,
+            metadata: None,
+        };
+        Box::pin(async move {
+            match execute_pipeline(&request, &state).await {
+                Ok(result) => match result.decision {
+                    GovernanceDecision::Allow => KernelDecision::Allow,
+                    GovernanceDecision::Review => KernelDecision::Review,
+                    GovernanceDecision::Block => KernelDecision::Block,
+                },
+                Err(e) => {
+                    tracing::error!(error = %e, "armor run: pipeline error; failing closed");
+                    KernelDecision::Block
+                }
+            }
+        })
+            as std::pin::Pin<
+                Box<dyn std::future::Future<Output = KernelDecision> + Send>,
+            >
+    });
+
+    let kernel = UserspaceKernel::new(policy);
+    println!(
+        "[armor run] backend={} agent={} program={} args={:?}",
+        kernel.backend_name(),
+        spec.agent_id,
+        spec.program,
+        spec.args
+    );
+    match kernel.launch(&spec).await {
+        Ok(out) => {
+            if let Some(reason) = &out.reason {
+                println!("[armor run] reason: {}", reason);
+            }
+            if let Some(pid) = out.pid {
+                println!("[armor run] pid: {}", pid);
+            }
+            println!("[armor run] decision: {:?}", out.decision);
+            out.exit_code.unwrap_or(0)
+        }
+        Err(e) => {
+            eprintln!("[armor run] error: {}", e);
+            3
+        }
+    }
+}
+
+#[cfg(feature = "receipts")]
+async fn cmd_replay(
+    db_url: &str,
+    run_id: Option<&str>,
+    verify_only: bool,
+    list: bool,
+    limit: u32,
+) -> i32 {
+    use armor_receipts::{ChainStatus, ReceiptSigner, ReceiptStore, SqliteReceiptStore};
+
+    if !db_url.starts_with("sqlite:") {
+        eprintln!("armor replay: only sqlite:// URLs are supported in 1.0-alpha.1");
+        return 2;
+    }
+
+    let key_path = match std::env::var("ARMOR_SIGNER_KEY_PATH")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|h| {
+                    let mut p = std::path::PathBuf::from(h);
+                    p.push(".armor");
+                    p.push("keys");
+                    p.push("receipt_signer.ed25519");
+                    p
+                })
+        }) {
+        Some(p) => p,
+        None => {
+            eprintln!("armor replay: cannot resolve signer key path");
+            return 3;
+        }
+    };
+
+    let signer = match ReceiptSigner::load_or_create(&key_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("armor replay: signer load failed: {e}");
+            return 3;
+        }
+    };
+
+    let store = match SqliteReceiptStore::new(db_url, signer.verifying_key()).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("armor replay: store open failed: {e}");
+            return 3;
+        }
+    };
+
+    if list {
+        match store.list_runs(limit).await {
+            Ok(runs) => {
+                if runs.is_empty() {
+                    println!("no runs recorded");
+                    return 0;
+                }
+                println!(
+                    "{:<36} {:>6} {:>8} {:<25} {:<25}",
+                    "run_id", "count", "verdict", "first", "last"
+                );
+                for r in runs {
+                    println!(
+                        "{:<36} {:>6} {:>8?} {:<25} {:<25}",
+                        r.run_id,
+                        r.receipt_count,
+                        r.terminal_verdict,
+                        r.first_timestamp,
+                        r.last_timestamp
+                    );
+                }
+                return 0;
+            }
+            Err(e) => {
+                eprintln!("armor replay --list: {e}");
+                return 3;
+            }
+        }
+    }
+
+    let rid = match run_id {
+        Some(r) => r,
+        None => {
+            eprintln!("armor replay: pass <run_id> or use --list");
+            return 2;
+        }
+    };
+
+    match store.verify_chain(rid).await {
+        Ok(ChainStatus::Valid { receipt_count }) => {
+            println!(
+                "CHAIN OK  run_id={}  receipts={}  signer={}",
+                rid,
+                receipt_count,
+                signer.key_id()
+            );
+        }
+        Ok(ChainStatus::Broken { seq, reason }) => {
+            eprintln!("CHAIN BROKEN  run_id={}  seq={}  reason={}", rid, seq, reason);
+            return 1;
+        }
+        Ok(ChainStatus::Empty) => {
+            eprintln!("CHAIN EMPTY  run_id={}", rid);
+            return 1;
+        }
+        Err(e) => {
+            eprintln!("armor replay: verify_chain error: {e}");
+            return 3;
+        }
+    }
+
+    if verify_only {
+        return 0;
+    }
+
+    // Drift replay: for M2 we do a minimal identity replay — no pipeline
+    // re-execution, we just print the stored verdict chain. Full drift
+    // replay against the current pipeline is M5.
+    match store.get_run(rid).await {
+        Ok(chain) => {
+            for r in chain {
+                println!(
+                    "  seq={:<4} verdict={:<8?} risk={:<3} reasons={:?}",
+                    r.body.seq, r.body.verdict, r.body.risk_score, r.body.reasons
+                );
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("armor replay: get_run: {e}");
+            3
         }
     }
 }

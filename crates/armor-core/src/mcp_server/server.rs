@@ -367,6 +367,10 @@ mod tests {
                 node_env: NodeEnv::Test,
                 default_mode: ServiceMode::Gateway,
             },
+            receipts: None,
+            reasoning: None,
+            #[cfg(feature = "apl")]
+            apl_overlay: None,
         })
     }
 
