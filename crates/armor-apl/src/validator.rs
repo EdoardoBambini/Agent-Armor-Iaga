@@ -80,7 +80,9 @@ fn validate_expr(e: &Expr) -> Result<()> {
             validate_expr(r)
         }
         Expr::Unary(_, inner) => validate_expr(inner),
-        Expr::Membership { needle, haystack, .. } => {
+        Expr::Membership {
+            needle, haystack, ..
+        } => {
             validate_expr(needle)?;
             validate_expr(haystack)
         }

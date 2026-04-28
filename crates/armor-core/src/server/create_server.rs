@@ -1230,9 +1230,7 @@ async fn receipts_run_handler(
     }
 }
 
-async fn policy_overlay_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn policy_overlay_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     #[cfg(feature = "apl")]
     {
         match state.apl_overlay.as_ref() {
@@ -1265,9 +1263,7 @@ async fn policy_overlay_handler(
     }
 }
 
-async fn reasoning_status_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn reasoning_status_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let (engine, models) = match state.reasoning.as_ref() {
         Some(rh) => (
             rh.engine_name().to_string(),

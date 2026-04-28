@@ -660,8 +660,7 @@ pub async fn execute_pipeline(
             ml_scores,
         );
         if let Some(fired) = overlay.evaluate(&ctx) {
-            let merged =
-                crate::pipeline::apl_overlay::merge_decisions(decision, fired.verdict);
+            let merged = crate::pipeline::apl_overlay::merge_decisions(decision, fired.verdict);
             let reason_str = fired.reason.unwrap_or_else(|| "fired".to_string());
             reasons.push(format!("apl[{}]: {}", fired.policy_name, reason_str));
             decision = merged;

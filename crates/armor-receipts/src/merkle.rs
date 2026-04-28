@@ -32,10 +32,7 @@ pub fn verify_chain(receipts: &[Receipt], vk: &VerifyingKey) -> Result<ChainStat
         if &r.body.run_id != run_id {
             return Ok(ChainStatus::Broken {
                 seq,
-                reason: format!(
-                    "run_id mismatch: expected {} got {}",
-                    run_id, r.body.run_id
-                ),
+                reason: format!("run_id mismatch: expected {} got {}", run_id, r.body.run_id),
             });
         }
 
@@ -88,4 +85,3 @@ pub fn chain_link(head: Option<&Receipt>) -> Result<(Option<String>, u64)> {
     let next_seq = head.map(|r| r.body.seq + 1).unwrap_or(0);
     Ok((parent, next_seq))
 }
-

@@ -50,9 +50,7 @@ impl EnforcementKernel for BpfKernel {
         // Honest scaffold: we say no until the real loader lands.
         Ok(LaunchOutcome {
             decision: KernelDecision::Block,
-            reason: Some(
-                "linux-bpf scaffold active; LSM loader pending M4.1".into(),
-            ),
+            reason: Some("linux-bpf scaffold active; LSM loader pending M4.1".into()),
             pid: None,
             exit_code: None,
             backend: self.backend_name(),

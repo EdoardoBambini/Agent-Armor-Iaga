@@ -3,9 +3,7 @@
 
 use std::sync::Arc;
 
-use armor_kernel::{
-    EnforcementKernel, KernelDecision, PolicyCheck, ProcessSpec, UserspaceKernel,
-};
+use armor_kernel::{EnforcementKernel, KernelDecision, PolicyCheck, ProcessSpec, UserspaceKernel};
 
 fn spec_cargo_version() -> ProcessSpec {
     ProcessSpec {
@@ -31,12 +29,13 @@ async fn allow_all_spawns_and_returns_exit_code() {
 async fn block_policy_prevents_spawn() {
     let policy: PolicyCheck = Arc::new(|_spec: &ProcessSpec| {
         Box::pin(async { KernelDecision::Block })
-            as std::pin::Pin<
-                Box<dyn std::future::Future<Output = KernelDecision> + Send>,
-            >
+            as std::pin::Pin<Box<dyn std::future::Future<Output = KernelDecision> + Send>>
     });
     let k = UserspaceKernel::new(policy);
-    let out = k.launch(&spec_cargo_version()).await.expect("launch returns");
+    let out = k
+        .launch(&spec_cargo_version())
+        .await
+        .expect("launch returns");
     assert_eq!(out.decision, KernelDecision::Block);
     assert!(out.pid.is_none(), "blocked launch must not spawn");
     assert!(out.exit_code.is_none());
@@ -47,12 +46,13 @@ async fn block_policy_prevents_spawn() {
 async fn review_policy_holds_launch() {
     let policy: PolicyCheck = Arc::new(|_spec: &ProcessSpec| {
         Box::pin(async { KernelDecision::Review })
-            as std::pin::Pin<
-                Box<dyn std::future::Future<Output = KernelDecision> + Send>,
-            >
+            as std::pin::Pin<Box<dyn std::future::Future<Output = KernelDecision> + Send>>
     });
     let k = UserspaceKernel::new(policy);
-    let out = k.launch(&spec_cargo_version()).await.expect("launch returns");
+    let out = k
+        .launch(&spec_cargo_version())
+        .await
+        .expect("launch returns");
     assert_eq!(out.decision, KernelDecision::Review);
     assert!(out.pid.is_none());
     assert!(out.reason.as_deref().unwrap_or("").contains("review"));
@@ -90,10 +90,7 @@ fn policy_callback_sees_full_spec() {
         Box::pin(async move {
             *captured.lock().unwrap() = Some(program);
             KernelDecision::Block
-        })
-            as std::pin::Pin<
-                Box<dyn std::future::Future<Output = KernelDecision> + Send>,
-            >
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = KernelDecision> + Send>>
     });
     let k = UserspaceKernel::new(policy);
     let rt = tokio::runtime::Builder::new_current_thread()
