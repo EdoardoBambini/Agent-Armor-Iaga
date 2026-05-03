@@ -2,21 +2,32 @@ Business Source License 1.1
 
 Parameters
 
-Licensor:             IAGA
-Licensed Work:        Agent Armor v1.0.0
-                      The Licensed Work is (c) 2026 IAGA
+Licensor:             Edoardo Bambini, William Petteni, Justus Moritz Bohr
+
+Licensed Work:        IAGA Sentinel v1.0.0
+                      The Licensed Work is (c) 2026 Edoardo Bambini,
+                      William Petteni, Justus Moritz Bohr.
+
+                      This work was previously distributed under the
+                      name "Agent Armor" and was renamed to "IAGA
+                      Sentinel" to avoid confusion with unrelated
+                      projects of similar name.
+
 Additional Use Grant: You may make production use of the Licensed Work,
                       provided your use does not include offering the
-                      Licensed Work to third parties as a hosted or
-                      managed service where the service provides users
-                      with access to any substantial set of the features
-                      or functionality of the Licensed Work.
-Change Date:          Four years from the date the Licensed Work is
-                      published.
+                      Licensed Work, or any substantially similar AI
+                      agent runtime governance service derived from it,
+                      to third parties as a hosted or managed service
+                      where the service provides users with access to a
+                      substantial set of the features or functionality
+                      of the Licensed Work.
+
+Change Date:          2030-05-03
+
 Change License:       Apache License, Version 2.0
 
-For information about alternative licensing arrangements for the Licensed
-Work, please contact: iaga.start@gmail.com
+For information about alternative licensing arrangements for the
+Licensed Work, please contact: [iaga.start@gmail.com](mailto:iaga.start@gmail.com)
 
 Notice
 
