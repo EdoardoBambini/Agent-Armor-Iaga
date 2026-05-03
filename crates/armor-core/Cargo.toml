@@ -78,7 +78,7 @@ hex = "0.4"
 futures-core = "0.3"
 
 # optional features
-wasmtime = { version = "36.0.7", optional = true }
+wasmtime = { version = "36.0.8", optional = true }
 rust-embed = { version = "8", optional = true, features = ["interpolate-folder-path"] }
 armor-receipts = { path = "../armor-receipts", optional = true }
 armor-apl = { path = "../armor-apl", optional = true }
